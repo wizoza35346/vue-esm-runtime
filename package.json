@@ -1,0 +1,31 @@
+{
+  "name": "vue-esm-runtime",
+  "version": "1.0.0",
+  "description": "Browser ES Module loader for Vue SFC",
+  "type": "module",
+  "main": "dist/vue-esm-runtime.js",
+  "module": "dist/vue-esm-runtime.esm.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rollup -c",
+    "build:watch": "rollup -c -w",
+    "dev": "http-server . -p 8080 -c-1"
+  },
+  "keywords": [
+    "vue",
+    "esm",
+    "sfc",
+    "runtime",
+    "browser"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-terser": "^0.4.4",
+    "rollup": "^4.9.0",
+    "http-server": "^14.1.1",
+    "@vue/compiler-sfc": "^3.5.27"
+  }
+}
