@@ -16,6 +16,11 @@ export function createAppRouter() {
       path: '/counter',
       name: 'Counter',
       component: () => import('../components/Counter.vue')
+    },
+    {
+      path: '/macros',
+      name: 'Macros',
+      component: () => import('../components/MacroTest.vue')
     }
   ]
 

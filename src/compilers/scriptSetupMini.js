@@ -594,7 +594,7 @@ function stripComments(code) {
 
 export function compileScriptSetup(code, options = {}) {
   // 檢查不支援的 macros，遇到時拋出錯誤讓 native compiler 接手
-  const unsupportedMacros = ['defineModel', 'defineSlots', 'defineOptions'];
+  const unsupportedMacros = ['defineSlots'];
   for (const macro of unsupportedMacros) {
     if (findMacroCall(code, macro, 0) !== -1) {
       throw new Error(`[mini-compiler] Unsupported macro: ${macro}. Use native compiler instead.`);
@@ -610,6 +610,8 @@ export function compileScriptSetup(code, options = {}) {
   let propsDefinition = null;
   let emitsDefinition = null;
   let exposeDefinition = null;
+  let defineOptionsRaw = null;
+  const modelDefinitions = [];
   let withDefaultsUsed = false;
   let hasTopLevelAwait = false;
   let transformed = code;
@@ -706,7 +708,7 @@ export function compileScriptSetup(code, options = {}) {
     const hasGeneric = transformed.slice(propsIndex).match(/^defineProps\s*<[^>]*>\s*\(\s*\)/);
     const replacement = destructMatch
       ? '__props__'
-      : (assignMatch ? ('const ' + assignMatch[1] + ' = __props__') : '// [extracted] defineProps');
+      : (assignMatch ? '__props__' : '// [extracted] defineProps');
     if (hasGeneric) {
       propsDefinition = { varName: null, definition: '{}' };
       transformed = transformed.replace(hasGeneric[0], replacement);
@@ -733,8 +735,49 @@ export function compileScriptSetup(code, options = {}) {
       const varName = assignMatch ? assignMatch[1] : 'emit';
       emitsDefinition = { varName, definition: emitDef || '[]' };
       const emitFullMatch = transformed.substring(emitsIndex, emitExtracted.end + 1);
-      transformed = transformed.replace(emitFullMatch, 'const ' + varName + ' = __emit__');
+      const replacement = assignMatch ? '__emit__' : 'const ' + varName + ' = __emit__';
+      transformed = transformed.replace(emitFullMatch, replacement);
     }
+  }
+
+  // defineModel — 收集所有 model，注入 prop/emit，呼叫換成 __useModel__
+  let modelIndex = findMacroCall(transformed, 'defineModel', 0);
+  while (modelIndex !== -1) {
+    const before = transformed.slice(0, modelIndex);
+
+    // Vue 3.4 修飾子解構（const [v, mods] = defineModel()）暫不支援，丟給 native
+    if (/(?:const|let|var)\s+\[[^\]]*\]\s*=\s*$/.test(before)) {
+      throw new Error('[mini-compiler] Unsupported defineModel destructuring (modifiers). Use native compiler instead.');
+    }
+
+    const parenStart = transformed.indexOf('(', modelIndex + 'defineModel'.length);
+    const extracted = extractBalanced(transformed, parenStart, '(', ')');
+    if (!extracted) break;
+
+    const argsRaw = extracted.content.slice(1, -1).trim();
+    const args = argsRaw ? splitTopLevelArgs(argsRaw) : [];
+
+    let propName = 'modelValue';
+    let optionsStr = null;
+    if (args.length === 1) {
+      const first = args[0].trim();
+      if (first[0] === "'" || first[0] === '"' || first[0] === '`') {
+        propName = first.slice(1, -1);
+      } else {
+        optionsStr = first;
+      }
+    } else if (args.length >= 2) {
+      const first = args[0].trim();
+      propName = first.slice(1, -1);
+      optionsStr = args[1].trim();
+    }
+
+    modelDefinitions.push({ propName, optionsStr });
+
+    const fullMatch = transformed.substring(modelIndex, extracted.end + 1);
+    transformed = transformed.replace(fullMatch, `__useModel__(${JSON.stringify(propName)})`);
+
+    modelIndex = findMacroCall(transformed, 'defineModel', 0);
   }
 
   const exposeIndex = findMacroCall(transformed, 'defineExpose');
@@ -745,6 +788,18 @@ export function compileScriptSetup(code, options = {}) {
       exposeDefinition = exposeExtracted.content.slice(1, -1).trim();
       const exposeFullMatch = transformed.substring(exposeIndex, exposeExtracted.end + 1);
       transformed = transformed.replace(exposeFullMatch, '// [extracted] defineExpose');
+    }
+  }
+
+  const optionsIndex = findMacroCall(transformed, 'defineOptions');
+  if (optionsIndex !== -1) {
+    const optionsParenStart = transformed.indexOf('(', optionsIndex + 'defineOptions'.length);
+    const optionsExtracted = extractBalanced(transformed, optionsParenStart, '(', ')');
+    if (optionsExtracted) {
+      const raw = optionsExtracted.content.slice(1, -1).trim();
+      defineOptionsRaw = raw || null;
+      const optionsFullMatch = transformed.substring(optionsIndex, optionsExtracted.end + 1);
+      transformed = transformed.replace(optionsFullMatch, '// [extracted] defineOptions');
     }
   }
 
@@ -828,12 +883,14 @@ export function compileScriptSetup(code, options = {}) {
   hasTopLevelAwait = detectTopLevelAwait(cleanedCode);
 
   let componentDef = '{\n';
-  componentDef += `  name: "${componentName}",\n`;
+  if (!defineOptionsRaw) {
+    componentDef += `  name: "${componentName}",\n`;
+  }
 
   if (vueComponents.length > 0) {
     componentDef += '  components: {\n';
     vueComponents.forEach((comp, i) => {
-      const asyncComp = `vueEsmRuntime("${comp.path}")`;
+      const asyncComp = `vueEsmRuntime(vueEsmRuntime.resolveURL(__baseURI__, "${comp.path}"))`;
       componentDef += `    "${comp.name}": ${asyncComp},\n`;
       componentDef += `    "${comp.name.toLowerCase()}": ${asyncComp}`;
       componentDef += i < vueComponents.length - 1 ? ',\n' : '\n';
@@ -841,18 +898,51 @@ export function compileScriptSetup(code, options = {}) {
     componentDef += '  },\n';
   }
 
-  if (propsDefinition) {
-    componentDef += `  props: ${propsDefinition.definition},\n`;
+  const modelPropEntries = modelDefinitions
+    .map(m => `${JSON.stringify(m.propName)}: ${m.optionsStr || 'null'}`)
+    .join(', ');
+  const modelEmitEntries = modelDefinitions
+    .map(m => JSON.stringify(`update:${m.propName}`))
+    .join(', ');
+
+  if (propsDefinition || modelDefinitions.length > 0) {
+    let propsExpr;
+    if (modelDefinitions.length === 0) {
+      propsExpr = propsDefinition.definition;
+    } else if (!propsDefinition) {
+      propsExpr = `{ ${modelPropEntries} }`;
+    } else {
+      propsExpr = `Object.assign({}, ${propsDefinition.definition}, { ${modelPropEntries} })`;
+    }
+    componentDef += `  props: ${propsExpr},\n`;
   }
 
-  if (emitsDefinition) {
-    componentDef += `  emits: ${emitsDefinition.definition},\n`;
+  if (emitsDefinition || modelDefinitions.length > 0) {
+    let emitsExpr;
+    if (modelDefinitions.length === 0) {
+      emitsExpr = emitsDefinition.definition;
+    } else if (!emitsDefinition) {
+      emitsExpr = `[${modelEmitEntries}]`;
+    } else {
+      emitsExpr = `[].concat(${emitsDefinition.definition}, [${modelEmitEntries}])`;
+    }
+    componentDef += `  emits: ${emitsExpr},\n`;
   }
 
   // 如果有頂層 await，setup 函數需要是 async
   const asyncKeyword = hasTopLevelAwait ? 'async ' : '';
   componentDef += `  setup: ${asyncKeyword}function(__props__, __ctx__) {\n`;
   componentDef += '    var __emit__ = __ctx__.emit;\n';
+
+  if (modelDefinitions.length > 0) {
+    componentDef += '    var __computedRef__ = require("vue").computed;\n';
+    componentDef += '    function __useModel__(__name__) {\n';
+    componentDef += '      return __computedRef__({\n';
+    componentDef += '        get: function() { return __props__[__name__]; },\n';
+    componentDef += '        set: function(__value__) { __emit__("update:" + __name__, __value__); }\n';
+    componentDef += '      });\n';
+    componentDef += '    }\n';
+  }
 
   if (withDefaultsUsed) {
     componentDef += '    var __applyDefaults__ = function(__props__, __defaults__) {\n';
@@ -895,5 +985,8 @@ export function compileScriptSetup(code, options = {}) {
   componentDef += '  }\n';
   componentDef += '}';
 
+  if (defineOptionsRaw) {
+    return `module.exports = Object.assign({ name: "${componentName}" }, ${defineOptionsRaw}, ${componentDef});`;
+  }
   return 'module.exports = ' + componentDef;
 }

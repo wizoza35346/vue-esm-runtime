@@ -4,7 +4,8 @@
       <router-link to="/">首頁</router-link>
       <router-link to="/about">關於</router-link>
       <router-link to="/counter">計數器</router-link>
-      
+      <router-link to="/macros">Macros 測試</router-link>
+
     </nav>
     <Suspense>
       <router-view></router-view>

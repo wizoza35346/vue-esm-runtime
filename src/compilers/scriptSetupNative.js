@@ -28,15 +28,15 @@ function transformESModule(code) {
     (match, modulePath) => {
       if (modulePath.endsWith('.vue')) {
         const name = modulePath.split('/').pop().replace('.vue', '');
-        return `vueEsmRuntime.loadComponent("${modulePath}", "${name}")()`;
+        return `vueEsmRuntime.loadComponent(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"), "${name}")()`;
       }
-      return `vueEsmRuntime.loadModule("${modulePath}")`;
+      return `vueEsmRuntime.loadModule("${modulePath}", __baseURI__)`;
     }
   );
 
   transformed = transformed.replace(
     /import\s+(\w+)\s+from\s+['"]([^'"]+\.vue)['"]/g,
-    (match, name, modulePath) => `const ${name} = vueEsmRuntime("${modulePath}")`
+    (match, name, modulePath) => `const ${name} = vueEsmRuntime(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"))`
   );
 
   transformed = transformed.replace(

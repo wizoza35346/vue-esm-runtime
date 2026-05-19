@@ -130,7 +130,10 @@ const emit = defineEmits(['click'])
 | `defineProps()` | ✅ | 支援物件語法 |
 | `defineEmits()` | ✅ | 支援陣列/物件語法 |
 | `defineExpose()` | ✅ | 暴露組件實例方法 |
+| `defineOptions()` | ✅ | 組件選項定義（`name`、`inheritAttrs` 等）|
+| `defineModel()` | ✅ | Vue 3.4+ 雙向綁定（支援多 model、自訂名稱、options；不支援修飾子解構）|
 | `withDefaults()` | ✅ | Props 預設值 |
+| 型別化 `defineProps` / `defineEmits` / `defineModel` | ⚠️ | 接受 `<T>` 語法但忽略型別資訊（無 runtime 驗證）|
 | import 組件自動註冊 | ✅ | `import Child from './Child.vue'` |
 | import Vue API | ✅ | `import { ref } from 'vue'` |
 | 巢狀解構 | ✅ | `const { a: { b } } = obj` |
@@ -142,10 +145,9 @@ const emit = defineEmits(['click'])
 
 | 功能 | 說明 |
 |------|------|
-| `defineModel()` | Vue 3.4+ 雙向綁定 macro |
 | `defineSlots()` | 型別化的 slots |
-| `defineOptions()` | 組件選項定義 |
-| 型別化 `defineProps` / `defineEmits` | `defineProps<T>()`、`defineEmits<T>()` |
+| `defineModel()` 修飾子解構 | `const [v, mods] = defineModel()`（Vue 3.4+ 修飾子）|
+| 帶 runtime 驗證的型別化 macros | 需要型別轉成 runtime 檢查時 |
 
 ### 不支援的功能
 

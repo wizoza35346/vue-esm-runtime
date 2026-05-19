@@ -310,16 +310,16 @@ export class ScriptContext {
       (match, modulePath) => {
         if (modulePath.endsWith('.vue')) {
           const name = modulePath.split('/').pop().replace('.vue', '');
-          return `vueEsmRuntime.loadComponent("${modulePath}", "${name}")()`;
+          return `vueEsmRuntime.loadComponent(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"), "${name}")()`;
         }
-        return `vueEsmRuntime.loadModule("${modulePath}")`;
+        return `vueEsmRuntime.loadModule("${modulePath}", __baseURI__)`;
       }
     );
 
     // import Xxx from './Xxx.vue'
     transformed = transformed.replace(
       /import\s+(\w+)\s+from\s+['"]([^'"]+\.vue)['"]/g,
-      (match, name, modulePath) => `const ${name} = vueEsmRuntime("${modulePath}")`
+      (match, name, modulePath) => `const ${name} = vueEsmRuntime(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"))`
     );
 
     // import { a, b } from 'module'
@@ -371,12 +371,14 @@ export class ScriptContext {
    * 執行編譯後的程式碼
    */
   _executeScript(scriptContent, childModuleRequire, vueEsmRuntime) {
-    Function('exports', 'require', 'vueEsmRuntime', 'module', scriptContent).call(
+    const baseURI = this.component ? this.component.baseURI : '';
+    Function('exports', 'require', 'vueEsmRuntime', 'module', '__baseURI__', scriptContent).call(
       this.module.exports,
       this.module.exports,
       childModuleRequire,
       vueEsmRuntime,
-      this.module
+      this.module,
+      baseURI
     );
   }
 
