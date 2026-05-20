@@ -352,7 +352,7 @@ export class ScriptContext {
     // export function
     transformed = transformed.replace(
       /export\s+function\s+(\w+)/g,
-      (match, name) => `module.exports.${name} = function ${name}`
+      (match, name) => `module.exports.${name} = ${name}; function ${name}`
     );
 
     // export { a, b }

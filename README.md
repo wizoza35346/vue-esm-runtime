@@ -304,6 +304,18 @@ import { store } from '../js/store.js'    // 解析為 /app/js/store.js（同 ke
 console.log(store.count)                  // 5 — 同一個 reactive proxy
 ```
 
+### 巢狀相對路徑解析
+
+每個被載入的 `.js` 都保有自己的 baseURI，所以「`.vue` 載 `.js`，這個 `.js` 又載另一個 `.js`」的鏈式 import 會以**目前檔案的位置**為基準解析路徑：
+
+```javascript
+// example_vue3/composables/useGreeting.js
+import { formatName } from '../js/utils/format.js'   // 從 composables/ 起跳
+                                                      // → 解析為 ./js/utils/format.js
+```
+
+無論是 async 路徑（`loadModule`）還是 sync 路徑（SFC `<script setup>` 內的 import 轉換成的 `require()`），都會傳遞並使用 baseURI；同一個檔案不會因為被不同層級 import 而重複載入。
+
 ## 專案結構
 
 ### 原始碼結構

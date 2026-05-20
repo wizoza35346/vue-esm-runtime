@@ -160,9 +160,10 @@ function loadModule(url, baseURI) {
       return `${kw} ${name} = module.exports.${name} =`;
     });
 
-    // export function
+    // export function — 用 hoisted function declaration 確保名字在 module scope 可見
+    // 不然 `module.exports.default = { foo }` shorthand 會 ReferenceError
     code = code.replace(/export\s+function\s+(\w+)/g, (m, name) => {
-      return `module.exports.${name} = function ${name}`;
+      return `module.exports.${name} = ${name}; function ${name}`;
     });
 
     if (hasAsyncImport) {
@@ -234,7 +235,7 @@ function requireModule(moduleName) {
           return `${kw} ${name} = module.exports.${name} =`;
         });
         code = code.replace(/export\s+function\s+(\w+)/g, (m, name) => {
-          return `module.exports.${name} = function ${name}`;
+          return `module.exports.${name} = ${name}; function ${name}`;
         });
         code = code.replace(/import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g, (m, imports, path) => {
           return `const {${imports}} = require("${path}")`;
@@ -243,7 +244,16 @@ function requireModule(moduleName) {
           return `const ${name} = vueEsmRuntime.interopDefault(require("${path}"))`;
         });
 
-        Function('module', 'exports', 'require', 'vueEsmRuntime', code)(moduleObj, moduleObj.exports, requireModule, vueEsmRuntime);
+        // 此模組的 baseURI，用於解析內層 require 的相對路徑
+        const moduleBaseURI = moduleName.substr(0, moduleName.lastIndexOf('/') + 1);
+        const wrappedRequire = (path) => {
+          if (typeof path === 'string' && (path.startsWith('./') || path.startsWith('../'))) {
+            return requireModule(resolveURL(moduleBaseURI, path));
+          }
+          return requireModule(path);
+        };
+
+        Function('module', 'exports', 'require', 'vueEsmRuntime', code)(moduleObj, moduleObj.exports, wrappedRequire, vueEsmRuntime);
 
         externalModules[moduleName] = moduleObj.exports;
         return moduleObj.exports;

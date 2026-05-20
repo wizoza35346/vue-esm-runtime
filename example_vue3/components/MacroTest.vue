@@ -28,6 +28,46 @@
     </section>
 
     <section>
+      <h2>多層級路徑解析測試</h2>
+      <table class="path-table">
+        <thead>
+          <tr><th>場景</th><th>Import 路徑</th><th>結果</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>同層</td>
+            <td><code>./store.js</code> (from router.js)</td>
+            <td class="value">visitCount = {{ store.visitCount }}</td>
+          </tr>
+          <tr>
+            <td>往下子目錄</td>
+            <td><code>./utils/format.js</code> (from store.js)</td>
+            <td class="value">PREFIX 已成功載入</td>
+          </tr>
+          <tr>
+            <td>跨目錄（上+下）</td>
+            <td><code>../js/utils/format.js</code> (from composables/)</td>
+            <td class="value">{{ greeting }}</td>
+          </tr>
+          <tr>
+            <td>SFC 往上+跨</td>
+            <td><code>../composables/useGreeting.js</code> (from components/)</td>
+            <td class="value">{{ composablePath }}</td>
+          </tr>
+          <tr>
+            <td>SFC 直接跨目錄</td>
+            <td><code>../js/utils/format.js</code> (from components/)</td>
+            <td class="value">{{ directFormat }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="hint">
+        所有 import 必須解析為同一個絕對路徑才能命中 cache。
+        切記 console 觀察 <code>[utils/format.js] loaded</code> 只應該出現 <strong>一次</strong>。
+      </p>
+    </section>
+
+    <section>
       <h2>跨模組共享 store 測試</h2>
       <div class="store-test">
         <p>
@@ -60,9 +100,18 @@
 import { ref } from 'vue'
 import ModelChild from './ModelChild.vue'
 import { store } from '../js/store.js'
+import { useGreeting, COMPOSABLE_PATH } from '../composables/useGreeting.js'
+import { formatName } from '../js/utils/format.js'
 
 console.log('[MacroTest.vue] store imported:', store)
 console.log('[MacroTest.vue] store.visitCount at mount:', store.visitCount)
+console.log('[MacroTest.vue] COMPOSABLE_PATH:', COMPOSABLE_PATH)
+console.log('[MacroTest.vue] useGreeting("World"):', useGreeting('World'))
+console.log('[MacroTest.vue] formatName direct:', formatName('Direct'))
+
+const greeting = useGreeting('World')
+const composablePath = COMPOSABLE_PATH
+const directFormat = formatName('Direct')
 
 const title = ref('初始 title')
 const count = ref(5)
@@ -130,6 +179,34 @@ section {
 }
 .parent-actions button:hover {
   background: #3aa876;
+}
+.path-table {
+  width: 100%;
+  background: #fff;
+  border-collapse: collapse;
+  border: 1px solid #e0e0e0;
+  font-size: 14px;
+}
+.path-table th,
+.path-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #eee;
+  text-align: left;
+}
+.path-table th {
+  background: #f5f5f5;
+  font-weight: 600;
+}
+.path-table td.value {
+  font-family: monospace;
+  background: #e8f5e9;
+  color: #1b5e20;
+}
+.path-table code {
+  background: #fff8e1;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 12px;
 }
 .store-test {
   background: #fff;
