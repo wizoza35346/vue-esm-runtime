@@ -28,6 +28,21 @@
     </section>
 
     <section>
+      <h2>跨模組共享 store 測試</h2>
+      <div class="store-test">
+        <p>
+          <strong>store.visitCount:</strong>
+          <span class="value">{{ store.visitCount }}</span>
+          <button @click="bumpStore">增加（同一 store）</button>
+        </p>
+        <p class="hint">
+          router.js 啟動時呼叫過 <code>incrementVisit()</code>，所以進入此頁時應該 ≥ 1。<br>
+          按按鈕後數字會即時更新——證明 router.js 跟 MacroTest.vue 拿到的是同一個 reactive instance。
+        </p>
+      </div>
+    </section>
+
+    <section>
       <h2>驗證項目</h2>
       <ul class="checks">
         <li>✅ <strong>defineOptions.name</strong>：子元件 <code>$options.name</code> 顯示為 <code>ModelChildCustomName</code>（不是預設名）</li>
@@ -35,6 +50,7 @@
         <li>✅ <strong>defineModel 自訂名 + options</strong>：count 初始為 0，子/父雙向同步</li>
         <li>✅ <strong>多個 model 共存</strong>：title / count / tag 三個 model 同時運作</li>
         <li>✅ <strong>父層→子層</strong>：點上方按鈕改父層 ref，子層輸入框即時反映</li>
+        <li>✅ <strong>跨模組同 instance</strong>：router.js 跟此頁 import 的 store 是同一個 reactive proxy（cache by 解析後的絕對路徑）</li>
       </ul>
     </section>
   </div>
@@ -43,6 +59,10 @@
 <script setup>
 import { ref } from 'vue'
 import ModelChild from './ModelChild.vue'
+import { store } from '../js/store.js'
+
+console.log('[MacroTest.vue] store imported:', store)
+console.log('[MacroTest.vue] store.visitCount at mount:', store.visitCount)
 
 const title = ref('初始 title')
 const count = ref(5)
@@ -52,6 +72,10 @@ function reset() {
   title.value = '初始 title'
   count.value = 5
   tag.value = ''
+}
+
+function bumpStore() {
+  store.incrementVisit()
 }
 </script>
 
@@ -106,6 +130,37 @@ section {
 }
 .parent-actions button:hover {
   background: #3aa876;
+}
+.store-test {
+  background: #fff;
+  padding: 12px 16px;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+}
+.store-test .value {
+  display: inline-block;
+  min-width: 32px;
+  padding: 2px 10px;
+  margin: 0 8px;
+  background: #fff3cd;
+  border-radius: 4px;
+  font-family: monospace;
+  font-weight: bold;
+  text-align: center;
+}
+.store-test button {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 4px;
+  background: #f57c00;
+  color: white;
+  cursor: pointer;
+}
+.store-test .hint {
+  color: #666;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 8px 0 0;
 }
 .checks {
   background: #fff;

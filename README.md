@@ -236,6 +236,10 @@ const Home = await vueEsmRuntime.loadComponent('./components/Home.vue', 'Home')(
 const MyComponent = vueEsmRuntime('./components/MyComponent.vue', 'MyComponent')
 ```
 
+### `vueEsmRuntime.interopDefault(mod)`
+
+ESM/CJS interop helper：若模組標記 `__esModule`（即同時有 default 與具名匯出）則回傳 `.default`，否則回傳整個模組。通常不需直接呼叫，runtime 在 `import X from './rel.js'` 轉換時會自動使用。
+
 ## 支援的 ES Module 語法
 
 ### 靜態 Import
@@ -273,6 +277,31 @@ export default { name: 'MyComponent' }
 export const myVar = 'value'
 export function myFunc() {}
 export { foo, bar }
+
+// 混合匯出（default + named 共存）
+export const store = reactive({ count: 0 })
+export function createStore() { return store }
+export default store
+```
+
+當檔案同時有 `default` 與具名匯出時，runtime 會以 `__esModule` 標記 + `.default` slot 儲存，並在 import 端自動套用 interop。對只有 `export default` 的檔案維持原 `module.exports = X` 行為。
+
+### 跨模組共享 instance（singleton）
+
+模組透過解析後的**絕對路徑**作為 cache key，所以不同檔案 import 同一個模組會拿到同一個實例：
+
+```javascript
+// store.js
+import { reactive } from 'vue'
+export const store = reactive({ count: 0 })
+
+// router.js
+import { store } from './store.js'        // 解析為 /app/js/store.js
+store.count = 5
+
+// SomeComponent.vue (在另一個目錄)
+import { store } from '../js/store.js'    // 解析為 /app/js/store.js（同 key）
+console.log(store.count)                  // 5 — 同一個 reactive proxy
 ```
 
 ## 專案結構

@@ -134,16 +134,26 @@ function loadModule(url, baseURI) {
       return `const {${imports}} = require("${path}")`;
     });
 
-    // import xxx from './xxx.js'
+    // import xxx from './xxx.js' (套 interop：若模組標記 __esModule，取 .default；否則取整個 exports)
     code = code.replace(/import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/g, (m, name, path) => {
       if (path.startsWith('./') || path.startsWith('../')) {
-        return `const ${name} = await vueEsmRuntime.loadModule("${path}", __baseURI__)`;
+        return `const ${name} = vueEsmRuntime.interopDefault(await vueEsmRuntime.loadModule("${path}", __baseURI__))`;
       }
       return `const ${name} = require("${path}")`;
     });
 
-    // export default
-    code = code.replace(/export\s+default\s+/g, 'module.exports = ');
+    // 偵測是否同時有 default 與具名匯出，決定 default 的轉換策略
+    const hasDefault = /export\s+default\s+/.test(code);
+    const hasNamed = /export\s+(const|let|var|function)\s+|export\s+\{/.test(code);
+    const isMixedExports = hasDefault && hasNamed;
+
+    if (isMixedExports) {
+      // 混合匯出：default 走 .default + __esModule 標記
+      code = code.replace(/export\s+default\s+/g, 'module.exports.__esModule = true, module.exports.default = ');
+    } else {
+      // 純 default 匯出：保留原有 `module.exports = X` 行為，避免 sync require 取到包裝物件
+      code = code.replace(/export\s+default\s+/g, 'module.exports = ');
+    }
 
     // export const/let/var
     code = code.replace(/export\s+(const|let|var)\s+(\w+)\s*=/g, (m, kw, name) => {
@@ -156,7 +166,7 @@ function loadModule(url, baseURI) {
     });
 
     if (hasAsyncImport) {
-      code = '(async function() {\n' + code + '\n})()';
+      code = 'return (async function() {\n' + code + '\n})()';
     }
 
     const fn = Function('module', 'exports', 'require', 'vueEsmRuntime', '__baseURI__', code);
@@ -172,6 +182,15 @@ function loadModule(url, baseURI) {
     externalModules[resolvedURL] = moduleObj.exports;
     return moduleObj.exports;
   });
+}
+
+/**
+ * interop helper: 處理 ESM default 匯出
+ * - 模組標記 __esModule：取 .default
+ * - 否則：回傳整個 exports（向後相容純 CommonJS 風格 default）
+ */
+function interopDefault(mod) {
+  return mod && mod.__esModule ? mod.default : mod;
 }
 
 /**
@@ -204,7 +223,13 @@ function requireModule(moduleName) {
       try {
         let code = xhr.responseText;
 
-        code = code.replace(/export\s+default\s+/g, 'module.exports = ');
+        const hasDefault = /export\s+default\s+/.test(code);
+        const hasNamed = /export\s+(const|let|var|function)\s+|export\s+\{/.test(code);
+        if (hasDefault && hasNamed) {
+          code = code.replace(/export\s+default\s+/g, 'module.exports.__esModule = true, module.exports.default = ');
+        } else {
+          code = code.replace(/export\s+default\s+/g, 'module.exports = ');
+        }
         code = code.replace(/export\s+(const|let|var)\s+(\w+)\s*=/g, (m, kw, name) => {
           return `${kw} ${name} = module.exports.${name} =`;
         });
@@ -215,10 +240,10 @@ function requireModule(moduleName) {
           return `const {${imports}} = require("${path}")`;
         });
         code = code.replace(/import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/g, (m, name, path) => {
-          return `const ${name} = require("${path}")`;
+          return `const ${name} = vueEsmRuntime.interopDefault(require("${path}"))`;
         });
 
-        Function('module', 'exports', 'require', code)(moduleObj, moduleObj.exports, requireModule);
+        Function('module', 'exports', 'require', 'vueEsmRuntime', code)(moduleObj, moduleObj.exports, requireModule, vueEsmRuntime);
 
         externalModules[moduleName] = moduleObj.exports;
         return moduleObj.exports;
@@ -264,6 +289,7 @@ vueEsmRuntime.setScriptSetupCompiler = setScriptSetupCompiler;
 vueEsmRuntime.require = requireModule;
 vueEsmRuntime.resolveURL = resolveURL;
 vueEsmRuntime.httpRequest = httpRequest;
+vueEsmRuntime.interopDefault = interopDefault;
 
 // Native compiler fallback 設定
 // 設定此值可以自訂 native compiler 的載入路徑

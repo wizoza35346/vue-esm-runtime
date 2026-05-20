@@ -44046,8 +44046,19 @@ function compileScriptSetup(code, options = {}) {
   imports.forEach(imp => {
     if (imp.type === 'named') {
       componentDef += `    var { ${imp.names.join(', ')} } = require("${imp.path}");\n`;
+      imp.names.forEach(entry => {
+        const aliasMatch = entry.match(/^(\w+)\s*:\s*(\w+)$/);
+        const localName = aliasMatch ? aliasMatch[2] : entry.trim();
+        if (/^[A-Za-z_$][\w$]*$/.test(localName) && !bindings.includes(localName)) {
+          bindings.push(localName);
+        }
+      });
     } else {
-      componentDef += `    var ${imp.names[0]} = require("${imp.path}");\n`;
+      const localName = imp.names[0];
+      componentDef += `    var ${localName} = vueEsmRuntime.interopDefault(require("${imp.path}"));\n`;
+      if (!bindings.includes(localName)) {
+        bindings.push(localName);
+      }
     }
   });
 
