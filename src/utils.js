@@ -69,6 +69,12 @@ export function resolveURL(baseURL, url) {
 }
 
 export function httpRequest(url) {
+  // 檢查外部是否已自定義 vueEsmRuntime.httpRequest，若有則優先委派執行
+  const runtime = (typeof vueEsmRuntime !== 'undefined' ? vueEsmRuntime : undefined)
+    || (typeof window !== 'undefined' ? window.vueEsmRuntime : undefined);
+  if (runtime && typeof runtime.httpRequest === 'function' && runtime.httpRequest !== httpRequest) {
+    return Promise.resolve(runtime.httpRequest(url));
+  }
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('GET', url);

@@ -74,6 +74,12 @@ function resolveURL(baseURL, url) {
 }
 
 function httpRequest(url) {
+  // 檢查外部是否已自定義 vueEsmRuntime.httpRequest，若有則優先委派執行
+  const runtime = (typeof vueEsmRuntime !== 'undefined' ? vueEsmRuntime : undefined)
+    || (typeof window !== 'undefined' ? window.vueEsmRuntime : undefined);
+  if (runtime && typeof runtime.httpRequest === 'function' && runtime.httpRequest !== httpRequest) {
+    return Promise.resolve(runtime.httpRequest(url));
+  }
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('GET', url);
@@ -1565,11 +1571,34 @@ class ScriptContext {
    */
   _executeScript(scriptContent, childModuleRequire, vueEsmRuntime) {
     const baseURI = this.component ? this.component.baseURI : '';
-    Function('exports', 'require', 'vueEsmRuntime', 'module', '__baseURI__', scriptContent).call(
+
+    // 1. 建立具有當前目錄記憶的局部加載器
+    const childLoader = (childURL, childName) => {
+      // 若已有完整 baseURI 前綴則不重複拼接，否則依 baseURI 解析相對路徑
+      const urlToLoad = (baseURI && typeof childURL === 'string' && childURL.startsWith(baseURI))
+        ? childURL
+        : resolveURL(baseURI, childURL);
+      return vueEsmRuntime(urlToLoad, childName);
+    };
+
+    // 2. 繼承複製原有的靜態屬性與方法
+    Object.assign(childLoader, vueEsmRuntime);
+    childLoader.load = (childURL, childName) => {
+      const urlToLoad = (baseURI && typeof childURL === 'string' && childURL.startsWith(baseURI))
+        ? childURL
+        : resolveURL(baseURI, childURL);
+      return vueEsmRuntime.loadComponent(urlToLoad, childName);
+    };
+    childLoader.loadComponent = childLoader.load;
+
+    // 3. 同時將 childLoader 注入為 'vueEsmRuntime' 與 'httpVueLoader'
+    //    遮蔽 (shadow) 全域變數，確保組件內相對路徑與既有寫法皆能正確繼承目錄
+    Function('exports', 'require', 'vueEsmRuntime', 'httpVueLoader', 'module', '__baseURI__', scriptContent).call(
       this.module.exports,
       this.module.exports,
       childModuleRequire,
-      vueEsmRuntime,
+      childLoader,
+      childLoader,
       this.module,
       baseURI
     );
@@ -1865,7 +1894,7 @@ function loadComponent(url, name) {
     return new Component(name)
       .load(url)
       .then(component => component.normalize(langProcessor))
-      .then(component => component.compile(vueEsmRuntime, scriptExportsHandler))
+      .then(component => component.compile(vueEsmRuntime$1, scriptExportsHandler))
       .then(component => {
         const exports$1 = component.script !== null ? component.script.module.exports : {};
 
@@ -1914,7 +1943,7 @@ function registerModules(mods) {
 
 function setScriptSetupCompiler(compiler) {
   scriptSetupCompiler = compiler || compileScriptSetup;
-  vueEsmRuntime.scriptSetupCompiler = scriptSetupCompiler;
+  vueEsmRuntime$1.scriptSetupCompiler = scriptSetupCompiler;
 }
 
 /**
@@ -1998,7 +2027,7 @@ function loadModule(url, baseURI) {
     }
 
     const fn = Function('module', 'exports', 'require', 'vueEsmRuntime', '__baseURI__', code);
-    const result = fn(moduleObj, moduleObj.exports, requireModule, vueEsmRuntime, moduleBaseURI);
+    const result = fn(moduleObj, moduleObj.exports, requireModule, vueEsmRuntime$1, moduleBaseURI);
 
     if (result && typeof result.then === 'function') {
       return result.then(() => {
@@ -2080,7 +2109,7 @@ function requireModule(moduleName) {
           return requireModule(path);
         };
 
-        Function('module', 'exports', 'require', 'vueEsmRuntime', code)(moduleObj, moduleObj.exports, wrappedRequire, vueEsmRuntime);
+        Function('module', 'exports', 'require', 'vueEsmRuntime', code)(moduleObj, moduleObj.exports, wrappedRequire, vueEsmRuntime$1);
 
         externalModules[moduleName] = moduleObj.exports;
         return moduleObj.exports;
@@ -2096,7 +2125,7 @@ function requireModule(moduleName) {
 /**
  * 主函式
  */
-function vueEsmRuntime(url, name) {
+function vueEsmRuntime$1(url, name) {
   const comp = parseComponentURL(url);
   const componentName = name || comp.name;
   const loader = loadComponent(comp.url, componentName);
@@ -2112,24 +2141,65 @@ function vueEsmRuntime(url, name) {
 }
 
 // 掛載 API
-vueEsmRuntime.modules = modules;
-vueEsmRuntime.externalModules = externalModules;
-vueEsmRuntime.langProcessor = langProcessor;
-vueEsmRuntime.scriptExportsHandler = scriptExportsHandler;
-vueEsmRuntime.scriptSetupCompiler = scriptSetupCompiler;
-vueEsmRuntime.loadComponent = loadComponent;
-vueEsmRuntime.loadComponentAsync = loadComponentAsync;
-vueEsmRuntime.loadModule = loadModule;
-vueEsmRuntime.registerModule = registerModule;
-vueEsmRuntime.registerModules = registerModules;
-vueEsmRuntime.setScriptSetupCompiler = setScriptSetupCompiler;
-vueEsmRuntime.require = requireModule;
-vueEsmRuntime.resolveURL = resolveURL;
-vueEsmRuntime.httpRequest = httpRequest;
-vueEsmRuntime.interopDefault = interopDefault;
+vueEsmRuntime$1.modules = modules;
+vueEsmRuntime$1.externalModules = externalModules;
+vueEsmRuntime$1.langProcessor = langProcessor;
+vueEsmRuntime$1.scriptExportsHandler = scriptExportsHandler;
+vueEsmRuntime$1.scriptSetupCompiler = scriptSetupCompiler;
+vueEsmRuntime$1.loadComponent = loadComponent;
+vueEsmRuntime$1.loadComponentAsync = loadComponentAsync;
+vueEsmRuntime$1.loadModule = loadModule;
+vueEsmRuntime$1.registerModule = registerModule;
+vueEsmRuntime$1.registerModules = registerModules;
+vueEsmRuntime$1.setScriptSetupCompiler = setScriptSetupCompiler;
+vueEsmRuntime$1.require = requireModule;
+vueEsmRuntime$1.resolveURL = resolveURL;
+vueEsmRuntime$1.httpRequest = httpRequest;
+vueEsmRuntime$1.interopDefault = interopDefault;
+
+// 在 vueEsmRuntime 定義後，掛載相容性方法
+vueEsmRuntime$1.load = loadComponent;
+vueEsmRuntime$1.parseComponentURL = parseComponentURL;
+vueEsmRuntime$1.parseModuleURL = parseModuleURL;
+
+// 實現 Vue Plugin 規範，支援 Vue.use(vueEsmRuntime)
+vueEsmRuntime$1.install = function (Vue) {
+  Vue.mixin({
+    beforeCreate: function () {
+      var components = this.$options.components;
+      if (!components) return;
+      for (var componentName in components) {
+        if (
+          typeof components[componentName] === 'string' &&
+          components[componentName].substr(0, 4) === 'url:'
+        ) {
+          var comp = parseComponentURL(components[componentName].substr(4));
+          var componentURL =
+            '_baseURI' in this.$options
+              ? resolveURL(this.$options._baseURI, comp.url)
+              : comp.url;
+
+          if (isNaN(componentName))
+            components[componentName] = loadComponent(componentURL, componentName);
+          else
+            components[componentName] = Vue.component(
+              comp.name,
+              loadComponent(componentURL, comp.name)
+            );
+        }
+      }
+    }
+  });
+};
+
+// 於瀏覽器全域環境下同時註冊相容別名
+if (typeof window !== 'undefined') {
+  window.vueEsmRuntime = vueEsmRuntime$1;
+  window.httpVueLoader = vueEsmRuntime$1; // 支援既有舊函式庫名稱
+}
 
 // Native compiler fallback 設定
 // 設定此值可以自訂 native compiler 的載入路徑
-vueEsmRuntime.nativeCompilerUrl = null;
+vueEsmRuntime$1.nativeCompilerUrl = null;
 
-export { vueEsmRuntime as default };
+export { vueEsmRuntime$1 as default };

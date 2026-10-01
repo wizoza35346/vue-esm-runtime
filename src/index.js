@@ -3,7 +3,7 @@
  * Browser ES Module loader for Vue SFC
  */
 
-import { identity, parseComponentURL, resolveURL, httpRequest } from './utils.js';
+import { identity, parseComponentURL, parseModuleURL, resolveURL, httpRequest } from './utils.js';
 import { Component } from './Component.js';
 import { compileScriptSetup } from './compilers/scriptSetupMini.js';
 
@@ -300,6 +300,47 @@ vueEsmRuntime.require = requireModule;
 vueEsmRuntime.resolveURL = resolveURL;
 vueEsmRuntime.httpRequest = httpRequest;
 vueEsmRuntime.interopDefault = interopDefault;
+
+// 在 vueEsmRuntime 定義後，掛載相容性方法
+vueEsmRuntime.load = loadComponent;
+vueEsmRuntime.parseComponentURL = parseComponentURL;
+vueEsmRuntime.parseModuleURL = parseModuleURL;
+
+// 實現 Vue Plugin 規範，支援 Vue.use(vueEsmRuntime)
+vueEsmRuntime.install = function (Vue) {
+  Vue.mixin({
+    beforeCreate: function () {
+      var components = this.$options.components;
+      if (!components) return;
+      for (var componentName in components) {
+        if (
+          typeof components[componentName] === 'string' &&
+          components[componentName].substr(0, 4) === 'url:'
+        ) {
+          var comp = parseComponentURL(components[componentName].substr(4));
+          var componentURL =
+            '_baseURI' in this.$options
+              ? resolveURL(this.$options._baseURI, comp.url)
+              : comp.url;
+
+          if (isNaN(componentName))
+            components[componentName] = loadComponent(componentURL, componentName);
+          else
+            components[componentName] = Vue.component(
+              comp.name,
+              loadComponent(componentURL, comp.name)
+            );
+        }
+      }
+    }
+  });
+};
+
+// 於瀏覽器全域環境下同時註冊相容別名
+if (typeof window !== 'undefined') {
+  window.vueEsmRuntime = vueEsmRuntime;
+  window.httpVueLoader = vueEsmRuntime; // 支援既有舊函式庫名稱
+}
 
 // Native compiler fallback 設定
 // 設定此值可以自訂 native compiler 的載入路徑

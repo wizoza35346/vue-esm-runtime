@@ -3,6 +3,7 @@
  */
 
 import { compileScriptSetup } from '../compilers/scriptSetupMini.js';
+import { resolveURL } from '../utils.js';
 
 export class ScriptContext {
   constructor(component, elt) {
@@ -372,11 +373,34 @@ export class ScriptContext {
    */
   _executeScript(scriptContent, childModuleRequire, vueEsmRuntime) {
     const baseURI = this.component ? this.component.baseURI : '';
-    Function('exports', 'require', 'vueEsmRuntime', 'module', '__baseURI__', scriptContent).call(
+
+    // 1. 建立具有當前目錄記憶的局部加載器
+    const childLoader = (childURL, childName) => {
+      // 若已有完整 baseURI 前綴則不重複拼接，否則依 baseURI 解析相對路徑
+      const urlToLoad = (baseURI && typeof childURL === 'string' && childURL.startsWith(baseURI))
+        ? childURL
+        : resolveURL(baseURI, childURL);
+      return vueEsmRuntime(urlToLoad, childName);
+    };
+
+    // 2. 繼承複製原有的靜態屬性與方法
+    Object.assign(childLoader, vueEsmRuntime);
+    childLoader.load = (childURL, childName) => {
+      const urlToLoad = (baseURI && typeof childURL === 'string' && childURL.startsWith(baseURI))
+        ? childURL
+        : resolveURL(baseURI, childURL);
+      return vueEsmRuntime.loadComponent(urlToLoad, childName);
+    };
+    childLoader.loadComponent = childLoader.load;
+
+    // 3. 同時將 childLoader 注入為 'vueEsmRuntime' 與 'httpVueLoader'
+    //    遮蔽 (shadow) 全域變數，確保組件內相對路徑與既有寫法皆能正確繼承目錄
+    Function('exports', 'require', 'vueEsmRuntime', 'httpVueLoader', 'module', '__baseURI__', scriptContent).call(
       this.module.exports,
       this.module.exports,
       childModuleRequire,
-      vueEsmRuntime,
+      childLoader,
+      childLoader,
       this.module,
       baseURI
     );
