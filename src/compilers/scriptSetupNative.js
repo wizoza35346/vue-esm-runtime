@@ -28,7 +28,7 @@ function transformESModule(code) {
     (match, modulePath) => {
       if (modulePath.endsWith('.vue')) {
         const name = modulePath.split('/').pop().replace('.vue', '');
-        return `vueEsmRuntime.loadComponent(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"), "${name}")()`;
+        return `vueEsmRuntime.loadComponent("${modulePath}", "${name}")()`;
       }
       return `vueEsmRuntime.loadModule("${modulePath}", __baseURI__)`;
     }
@@ -36,7 +36,7 @@ function transformESModule(code) {
 
   transformed = transformed.replace(
     /import\s+(\w+)\s+from\s+['"]([^'"]+\.vue)['"]/g,
-    (match, name, modulePath) => `const ${name} = vueEsmRuntime(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"))`
+    (match, name, modulePath) => `const ${name} = vueEsmRuntime("${modulePath}")`
   );
 
   transformed = transformed.replace(

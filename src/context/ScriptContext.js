@@ -305,22 +305,22 @@ export class ScriptContext {
   transformESModule(code) {
     let transformed = code;
 
-    // 動態 import
+    // 動態 import：直接傳遞 modulePath，交由 childLoader 或 loadComponent 統一解析
     transformed = transformed.replace(
       /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
       (match, modulePath) => {
         if (modulePath.endsWith('.vue')) {
           const name = modulePath.split('/').pop().replace('.vue', '');
-          return `vueEsmRuntime.loadComponent(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"), "${name}")()`;
+          return `vueEsmRuntime.loadComponent("${modulePath}", "${name}")()`;
         }
         return `vueEsmRuntime.loadModule("${modulePath}", __baseURI__)`;
       }
     );
 
-    // import Xxx from './Xxx.vue'
+    // import Xxx from './Xxx.vue'：直接調用 vueEsmRuntime("${modulePath}")，避免雙重 resolve
     transformed = transformed.replace(
       /import\s+(\w+)\s+from\s+['"]([^'"]+\.vue)['"]/g,
-      (match, name, modulePath) => `const ${name} = vueEsmRuntime(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"))`
+      (match, name, modulePath) => `const ${name} = vueEsmRuntime("${modulePath}")`
     );
 
     // import { a, b } from 'module'
@@ -376,25 +376,32 @@ export class ScriptContext {
 
     // 1. 建立具有當前目錄記憶的局部加載器
     const childLoader = (childURL, childName) => {
-      // 若已有完整 baseURI 前綴則不重複拼接，否則依 baseURI 解析相對路徑
-      const urlToLoad = (baseURI && typeof childURL === 'string' && childURL.startsWith(baseURI))
-        ? childURL
-        : resolveURL(baseURI, childURL);
-      return vueEsmRuntime(urlToLoad, childName);
+      let url = childURL;
+      // 防禦機制：若已有完整 baseURI 前綴則不重複拼接，否則依 baseURI 解析相對路徑
+      const cleanUrl = typeof url === 'string' ? url.replace(/^\.\//, '') : '';
+      const cleanBase = typeof baseURI === 'string' ? baseURI.replace(/^\.\//, '') : '';
+      const isAlreadyPrefixed = cleanBase && cleanUrl.startsWith(cleanBase);
+
+      const urlToLoad = isAlreadyPrefixed ? url : resolveURL(baseURI, url);
+      const vueUrl = (typeof urlToLoad === 'string' && !urlToLoad.endsWith('.vue')) ? urlToLoad + '.vue' : urlToLoad;
+      return vueEsmRuntime(vueUrl, childName);
     };
 
     // 2. 繼承複製原有的靜態屬性與方法
     Object.assign(childLoader, vueEsmRuntime);
     childLoader.load = (childURL, childName) => {
-      const urlToLoad = (baseURI && typeof childURL === 'string' && childURL.startsWith(baseURI))
-        ? childURL
-        : resolveURL(baseURI, childURL);
-      return vueEsmRuntime.loadComponent(urlToLoad, childName);
+      let url = childURL;
+      const cleanUrl = typeof url === 'string' ? url.replace(/^\.\//, '') : '';
+      const cleanBase = typeof baseURI === 'string' ? baseURI.replace(/^\.\//, '') : '';
+      const isAlreadyPrefixed = cleanBase && cleanUrl.startsWith(cleanBase);
+
+      const urlToLoad = isAlreadyPrefixed ? url : resolveURL(baseURI, url);
+      const vueUrl = (typeof urlToLoad === 'string' && !urlToLoad.endsWith('.vue')) ? urlToLoad + '.vue' : urlToLoad;
+      return vueEsmRuntime.loadComponent(vueUrl, childName);
     };
     childLoader.loadComponent = childLoader.load;
 
-    // 3. 同時將 childLoader 注入為 'vueEsmRuntime' 與 'httpVueLoader'
-    //    遮蔽 (shadow) 全域變數，確保組件內相對路徑與既有寫法皆能正確繼承目錄
+    // 3. 同時將 childLoader 注入為 'vueEsmRuntime' 與 'httpVueLoader' 遮蔽全域變數
     Function('exports', 'require', 'vueEsmRuntime', 'httpVueLoader', 'module', '__baseURI__', scriptContent).call(
       this.module.exports,
       this.module.exports,

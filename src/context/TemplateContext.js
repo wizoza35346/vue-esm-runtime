@@ -9,6 +9,11 @@ export class TemplateContext {
   }
 
   getContent() {
+    if (this.elt.content) {
+      const container = document.createElement('div');
+      container.appendChild(this.elt.content.cloneNode(true));
+      return container.innerHTML;
+    }
     return this.elt.innerHTML;
   }
 
@@ -27,6 +32,21 @@ export class TemplateContext {
       }
     }
     return null;
+  }
+
+  applyScope(scopeId) {
+    const tplElt = this.elt.content || this.elt;
+    const walk = (node) => {
+      if (node.nodeType === 1) { // Node.ELEMENT_NODE
+        node.setAttribute(scopeId, '');
+        for (let child = node.firstElementChild; child; child = child.nextElementSibling) {
+          walk(child);
+        }
+      }
+    };
+    for (let child = tplElt.firstElementChild; child; child = child.nextElementSibling) {
+      walk(child);
+    }
   }
 
   compile() {

@@ -124,36 +124,40 @@ class StyleContext {
   }
 
   scopeStyles(styleElt, scopeName) {
-    const process = () => {
-      const sheet = styleElt.sheet;
-      const rules = sheet.cssRules;
+    const processContainer = (container) => {
+      const rules = container.cssRules;
+      if (!rules) return;
 
       for (let i = 0; i < rules.length; ++i) {
         const rule = rules[i];
-        if (rule.type !== 1) continue;
+        if (rule.type === 1) { // CSSRule.STYLE_RULE
+          const scopedSelectors = [];
+          rule.selectorText.split(/\s*,\s*/).forEach(sel => {
+            scopedSelectors.push(scopeName + ' ' + sel);
+            const segments = sel.match(/([^ :]+)(.+)?/);
+            if (segments) {
+              scopedSelectors.push(segments[1] + scopeName + (segments[2] || ''));
+            }
+          });
 
-        const scopedSelectors = [];
-        rule.selectorText.split(/\s*,\s*/).forEach(sel => {
-          scopedSelectors.push(scopeName + ' ' + sel);
-          const segments = sel.match(/([^ :]+)(.+)?/);
-          scopedSelectors.push(segments[1] + scopeName + (segments[2] || ''));
-        });
-
-        const scopedRule = scopedSelectors.join(',') + rule.cssText.substr(rule.selectorText.length);
-        sheet.deleteRule(i);
-        sheet.insertRule(scopedRule, i);
+          const scopedRule = scopedSelectors.join(',') + rule.cssText.substr(rule.selectorText.length);
+          container.deleteRule(i);
+          container.insertRule(scopedRule, i);
+        } else if (rule.type === 4 && rule.cssRules) { // CSSRule.MEDIA_RULE
+          processContainer(rule);
+        }
       }
     };
 
     try {
-      process();
+      processContainer(styleElt.sheet);
     } catch (ex) {
       if (ex instanceof DOMException && ex.code === DOMException.INVALID_ACCESS_ERR) {
         styleElt.sheet.disabled = true;
         styleElt.addEventListener('load', function onStyleLoaded() {
           styleElt.removeEventListener('load', onStyleLoaded);
           setTimeout(() => {
-            process();
+            processContainer(styleElt.sheet);
             styleElt.sheet.disabled = false;
           });
         });
@@ -1086,7 +1090,7 @@ function compileScriptSetup(code, options = {}) {
   if (vueComponents.length > 0) {
     componentDef += '  components: {\n';
     vueComponents.forEach((comp, i) => {
-      const asyncComp = `vueEsmRuntime(vueEsmRuntime.resolveURL(__baseURI__, "${comp.path}"))`;
+      const asyncComp = `vueEsmRuntime("${comp.path}")`;
       componentDef += `    "${comp.name}": ${asyncComp},\n`;
       componentDef += `    "${comp.name.toLowerCase()}": ${asyncComp}`;
       componentDef += i < vueComponents.length - 1 ? ',\n' : '\n';
@@ -1503,22 +1507,22 @@ class ScriptContext {
   transformESModule(code) {
     let transformed = code;
 
-    // 動態 import
+    // 動態 import：直接傳遞 modulePath，交由 childLoader 或 loadComponent 統一解析
     transformed = transformed.replace(
       /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
       (match, modulePath) => {
         if (modulePath.endsWith('.vue')) {
           const name = modulePath.split('/').pop().replace('.vue', '');
-          return `vueEsmRuntime.loadComponent(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"), "${name}")()`;
+          return `vueEsmRuntime.loadComponent("${modulePath}", "${name}")()`;
         }
         return `vueEsmRuntime.loadModule("${modulePath}", __baseURI__)`;
       }
     );
 
-    // import Xxx from './Xxx.vue'
+    // import Xxx from './Xxx.vue'：直接調用 vueEsmRuntime("${modulePath}")，避免雙重 resolve
     transformed = transformed.replace(
       /import\s+(\w+)\s+from\s+['"]([^'"]+\.vue)['"]/g,
-      (match, name, modulePath) => `const ${name} = vueEsmRuntime(vueEsmRuntime.resolveURL(__baseURI__, "${modulePath}"))`
+      (match, name, modulePath) => `const ${name} = vueEsmRuntime("${modulePath}")`
     );
 
     // import { a, b } from 'module'
@@ -1574,25 +1578,32 @@ class ScriptContext {
 
     // 1. 建立具有當前目錄記憶的局部加載器
     const childLoader = (childURL, childName) => {
-      // 若已有完整 baseURI 前綴則不重複拼接，否則依 baseURI 解析相對路徑
-      const urlToLoad = (baseURI && typeof childURL === 'string' && childURL.startsWith(baseURI))
-        ? childURL
-        : resolveURL(baseURI, childURL);
-      return vueEsmRuntime(urlToLoad, childName);
+      let url = childURL;
+      // 防禦機制：若已有完整 baseURI 前綴則不重複拼接，否則依 baseURI 解析相對路徑
+      const cleanUrl = typeof url === 'string' ? url.replace(/^\.\//, '') : '';
+      const cleanBase = typeof baseURI === 'string' ? baseURI.replace(/^\.\//, '') : '';
+      const isAlreadyPrefixed = cleanBase && cleanUrl.startsWith(cleanBase);
+
+      const urlToLoad = isAlreadyPrefixed ? url : resolveURL(baseURI, url);
+      const vueUrl = (typeof urlToLoad === 'string' && !urlToLoad.endsWith('.vue')) ? urlToLoad + '.vue' : urlToLoad;
+      return vueEsmRuntime(vueUrl, childName);
     };
 
     // 2. 繼承複製原有的靜態屬性與方法
     Object.assign(childLoader, vueEsmRuntime);
     childLoader.load = (childURL, childName) => {
-      const urlToLoad = (baseURI && typeof childURL === 'string' && childURL.startsWith(baseURI))
-        ? childURL
-        : resolveURL(baseURI, childURL);
-      return vueEsmRuntime.loadComponent(urlToLoad, childName);
+      let url = childURL;
+      const cleanUrl = typeof url === 'string' ? url.replace(/^\.\//, '') : '';
+      const cleanBase = typeof baseURI === 'string' ? baseURI.replace(/^\.\//, '') : '';
+      const isAlreadyPrefixed = cleanBase && cleanUrl.startsWith(cleanBase);
+
+      const urlToLoad = isAlreadyPrefixed ? url : resolveURL(baseURI, url);
+      const vueUrl = (typeof urlToLoad === 'string' && !urlToLoad.endsWith('.vue')) ? urlToLoad + '.vue' : urlToLoad;
+      return vueEsmRuntime.loadComponent(vueUrl, childName);
     };
     childLoader.loadComponent = childLoader.load;
 
-    // 3. 同時將 childLoader 注入為 'vueEsmRuntime' 與 'httpVueLoader'
-    //    遮蔽 (shadow) 全域變數，確保組件內相對路徑與既有寫法皆能正確繼承目錄
+    // 3. 同時將 childLoader 注入為 'vueEsmRuntime' 與 'httpVueLoader' 遮蔽全域變數
     Function('exports', 'require', 'vueEsmRuntime', 'httpVueLoader', 'module', '__baseURI__', scriptContent).call(
       this.module.exports,
       this.module.exports,
@@ -1725,6 +1736,11 @@ class TemplateContext {
   }
 
   getContent() {
+    if (this.elt.content) {
+      const container = document.createElement('div');
+      container.appendChild(this.elt.content.cloneNode(true));
+      return container.innerHTML;
+    }
     return this.elt.innerHTML;
   }
 
@@ -1743,6 +1759,21 @@ class TemplateContext {
       }
     }
     return null;
+  }
+
+  applyScope(scopeId) {
+    const tplElt = this.elt.content || this.elt;
+    const walk = (node) => {
+      if (node.nodeType === 1) { // Node.ELEMENT_NODE
+        node.setAttribute(scopeId, '');
+        for (let child = node.firstElementChild; child; child = child.nextElementSibling) {
+          walk(child);
+        }
+      }
+    };
+    for (let child = tplElt.firstElementChild; child; child = child.nextElementSibling) {
+      walk(child);
+    }
   }
 
   compile() {
@@ -1772,9 +1803,15 @@ class Component {
 
   getScopeId() {
     if (this._scopeId === '') {
-      this._scopeId = 'data-s-' + (scopeIndex++).toString(36);
-      const rootElt = this.template.getRootElt();
-      if (rootElt) rootElt.setAttribute(this._scopeId, '');
+      this._scopeId = 'data-v-' + (scopeIndex++).toString(36);
+      if (this.template) {
+        if (typeof this.template.applyScope === 'function') {
+          this.template.applyScope(this._scopeId);
+        } else {
+          const rootElt = this.template.getRootElt();
+          if (rootElt) rootElt.setAttribute(this._scopeId, '');
+        }
+      }
     }
     return this._scopeId;
   }
@@ -1842,8 +1879,18 @@ class Component {
   }
 
   compile(vueEsmRuntime, scriptExportsHandler) {
+    // 若有 scoped style，先觸發 getScopeId() 讓 template 完成標籤注入
+    const hasScoped = this.styles.some(style => style.elt.hasAttribute('scoped'));
+    if (hasScoped) {
+      this.getScopeId();
+    }
+
     const childModuleRequire = childURL => {
       const resolved = vueEsmRuntime.resolveURL(this.baseURI, childURL);
+      // 若為 SFC 組件，自動回傳異步組件定義 (Vue 3 為 defineAsyncComponent)
+      if (typeof resolved === 'string' && resolved.endsWith('.vue')) {
+        return vueEsmRuntime(resolved);
+      }
       return vueEsmRuntime.require(resolved);
     };
 
@@ -1907,6 +1954,11 @@ function loadComponent(url, name) {
         }
 
         exports$1._baseURI = component.baseURI;
+
+        if (component._scopeId) {
+          exports$1.__scopeId = component._scopeId;
+          exports$1.scopeId = component._scopeId;
+        }
 
         modules[name] = exports$1;
         return modules[name];
@@ -2069,10 +2121,22 @@ function requireModule(moduleName) {
     return window[moduleName];
   }
 
+  // 若為 .vue 模組路徑，回傳組件定義
+  if (typeof moduleName === 'string' && moduleName.endsWith('.vue')) {
+    return vueEsmRuntime$1(moduleName);
+  }
+
+  // 自動補齊相對路徑的 .js 副檔名
+  let jsUrl = moduleName;
+  if (typeof jsUrl === 'string' && !jsUrl.endsWith('.js') && !jsUrl.endsWith('.vue') && 
+     (jsUrl.startsWith('./') || jsUrl.startsWith('../') || jsUrl.includes('/'))) {
+    jsUrl = jsUrl + '.js';
+  }
+
   // 同步載入 .js 檔案
-  if (moduleName.endsWith('.js') || moduleName.includes('/composables/') || moduleName.includes('/utils/')) {
+  if (jsUrl.endsWith('.js') || jsUrl.includes('/composables/') || jsUrl.includes('/utils/')) {
     const xhr = new XMLHttpRequest();
-    xhr.open('GET', moduleName, false);
+    xhr.open('GET', jsUrl, false);
     xhr.send(null);
 
     if (xhr.status >= 200 && xhr.status < 300) {
@@ -2101,9 +2165,12 @@ function requireModule(moduleName) {
         });
 
         // 此模組的 baseURI，用於解析內層 require 的相對路徑
-        const moduleBaseURI = moduleName.substr(0, moduleName.lastIndexOf('/') + 1);
+        const moduleBaseURI = jsUrl.substr(0, jsUrl.lastIndexOf('/') + 1);
         const wrappedRequire = (path) => {
           if (typeof path === 'string' && (path.startsWith('./') || path.startsWith('../'))) {
+            if (path.endsWith('.vue')) {
+              return vueEsmRuntime$1(resolveURL(moduleBaseURI, path));
+            }
             return requireModule(resolveURL(moduleBaseURI, path));
           }
           return requireModule(path);

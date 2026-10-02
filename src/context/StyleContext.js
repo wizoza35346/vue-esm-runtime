@@ -23,36 +23,40 @@ export class StyleContext {
   }
 
   scopeStyles(styleElt, scopeName) {
-    const process = () => {
-      const sheet = styleElt.sheet;
-      const rules = sheet.cssRules;
+    const processContainer = (container) => {
+      const rules = container.cssRules;
+      if (!rules) return;
 
       for (let i = 0; i < rules.length; ++i) {
         const rule = rules[i];
-        if (rule.type !== 1) continue;
+        if (rule.type === 1) { // CSSRule.STYLE_RULE
+          const scopedSelectors = [];
+          rule.selectorText.split(/\s*,\s*/).forEach(sel => {
+            scopedSelectors.push(scopeName + ' ' + sel);
+            const segments = sel.match(/([^ :]+)(.+)?/);
+            if (segments) {
+              scopedSelectors.push(segments[1] + scopeName + (segments[2] || ''));
+            }
+          });
 
-        const scopedSelectors = [];
-        rule.selectorText.split(/\s*,\s*/).forEach(sel => {
-          scopedSelectors.push(scopeName + ' ' + sel);
-          const segments = sel.match(/([^ :]+)(.+)?/);
-          scopedSelectors.push(segments[1] + scopeName + (segments[2] || ''));
-        });
-
-        const scopedRule = scopedSelectors.join(',') + rule.cssText.substr(rule.selectorText.length);
-        sheet.deleteRule(i);
-        sheet.insertRule(scopedRule, i);
+          const scopedRule = scopedSelectors.join(',') + rule.cssText.substr(rule.selectorText.length);
+          container.deleteRule(i);
+          container.insertRule(scopedRule, i);
+        } else if (rule.type === 4 && rule.cssRules) { // CSSRule.MEDIA_RULE
+          processContainer(rule);
+        }
       }
     };
 
     try {
-      process();
+      processContainer(styleElt.sheet);
     } catch (ex) {
       if (ex instanceof DOMException && ex.code === DOMException.INVALID_ACCESS_ERR) {
         styleElt.sheet.disabled = true;
         styleElt.addEventListener('load', function onStyleLoaded() {
           styleElt.removeEventListener('load', onStyleLoaded);
           setTimeout(() => {
-            process();
+            processContainer(styleElt.sheet);
             styleElt.sheet.disabled = false;
           });
         });

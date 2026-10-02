@@ -24,9 +24,15 @@ export class Component {
 
   getScopeId() {
     if (this._scopeId === '') {
-      this._scopeId = 'data-s-' + (scopeIndex++).toString(36);
-      const rootElt = this.template.getRootElt();
-      if (rootElt) rootElt.setAttribute(this._scopeId, '');
+      this._scopeId = 'data-v-' + (scopeIndex++).toString(36);
+      if (this.template) {
+        if (typeof this.template.applyScope === 'function') {
+          this.template.applyScope(this._scopeId);
+        } else {
+          const rootElt = this.template.getRootElt();
+          if (rootElt) rootElt.setAttribute(this._scopeId, '');
+        }
+      }
     }
     return this._scopeId;
   }
@@ -94,14 +100,19 @@ export class Component {
   }
 
   compile(vueEsmRuntime, scriptExportsHandler) {
+    // 若有 scoped style，先觸發 getScopeId() 讓 template 完成標籤注入
+    const hasScoped = this.styles.some(style => style.elt.hasAttribute('scoped'));
+    if (hasScoped) {
+      this.getScopeId();
+    }
+
     const childModuleRequire = childURL => {
       const resolved = vueEsmRuntime.resolveURL(this.baseURI, childURL);
+      // 若為 SFC 組件，自動回傳異步組件定義 (Vue 3 為 defineAsyncComponent)
+      if (typeof resolved === 'string' && resolved.endsWith('.vue')) {
+        return vueEsmRuntime(resolved);
+      }
       return vueEsmRuntime.require(resolved);
-    };
-
-    const childLoader = (childURL, childName) => {
-      const resolved = vueEsmRuntime.resolveURL(this.baseURI, childURL);
-      return vueEsmRuntime(resolved, childName);
     };
 
     return Promise.all([

@@ -890,7 +890,7 @@ export function compileScriptSetup(code, options = {}) {
   if (vueComponents.length > 0) {
     componentDef += '  components: {\n';
     vueComponents.forEach((comp, i) => {
-      const asyncComp = `vueEsmRuntime(vueEsmRuntime.resolveURL(__baseURI__, "${comp.path}"))`;
+      const asyncComp = `vueEsmRuntime("${comp.path}")`;
       componentDef += `    "${comp.name}": ${asyncComp},\n`;
       componentDef += `    "${comp.name.toLowerCase()}": ${asyncComp}`;
       componentDef += i < vueComponents.length - 1 ? ',\n' : '\n';

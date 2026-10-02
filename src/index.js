@@ -52,6 +52,11 @@ function loadComponent(url, name) {
 
         exports._baseURI = component.baseURI;
 
+        if (component._scopeId) {
+          exports.__scopeId = component._scopeId;
+          exports.scopeId = component._scopeId;
+        }
+
         modules[name] = exports;
         return modules[name];
       });
@@ -213,10 +218,22 @@ function requireModule(moduleName) {
     return window[moduleName];
   }
 
+  // 若為 .vue 模組路徑，回傳組件定義
+  if (typeof moduleName === 'string' && moduleName.endsWith('.vue')) {
+    return vueEsmRuntime(moduleName);
+  }
+
+  // 自動補齊相對路徑的 .js 副檔名
+  let jsUrl = moduleName;
+  if (typeof jsUrl === 'string' && !jsUrl.endsWith('.js') && !jsUrl.endsWith('.vue') && 
+     (jsUrl.startsWith('./') || jsUrl.startsWith('../') || jsUrl.includes('/'))) {
+    jsUrl = jsUrl + '.js';
+  }
+
   // 同步載入 .js 檔案
-  if (moduleName.endsWith('.js') || moduleName.includes('/composables/') || moduleName.includes('/utils/')) {
+  if (jsUrl.endsWith('.js') || jsUrl.includes('/composables/') || jsUrl.includes('/utils/')) {
     const xhr = new XMLHttpRequest();
-    xhr.open('GET', moduleName, false);
+    xhr.open('GET', jsUrl, false);
     xhr.send(null);
 
     if (xhr.status >= 200 && xhr.status < 300) {
@@ -245,9 +262,12 @@ function requireModule(moduleName) {
         });
 
         // 此模組的 baseURI，用於解析內層 require 的相對路徑
-        const moduleBaseURI = moduleName.substr(0, moduleName.lastIndexOf('/') + 1);
+        const moduleBaseURI = jsUrl.substr(0, jsUrl.lastIndexOf('/') + 1);
         const wrappedRequire = (path) => {
           if (typeof path === 'string' && (path.startsWith('./') || path.startsWith('../'))) {
+            if (path.endsWith('.vue')) {
+              return vueEsmRuntime(resolveURL(moduleBaseURI, path));
+            }
             return requireModule(resolveURL(moduleBaseURI, path));
           }
           return requireModule(path);
