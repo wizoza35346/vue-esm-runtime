@@ -194,15 +194,49 @@ function increment() {
 
 ### `vueEsmRuntime.registerModules(modules)`
 
-註冊外部模組，讓 `import` 語句能正確解析全域函式庫。
+註冊外部模組，讓 `import` 語句能正確解析全域或第三方函式庫。支援 **物件實例**、**Promise**、**非同步加載工廠函式 (`() => import(...)`)**：
 
 ```javascript
 vueEsmRuntime.registerModules({
+  // 1. 直接傳入全域實例
   'vue': Vue,
   'vue-router': VueRouter,
-  'axios': axios
+
+  // 2. 依需非同步加載（On-Demand / Code Splitting）：
+  // 首頁不下載，只有進入用到該套件的頁面時才自動非同步下載！
+  'jwt-decode': () => import('./jwt-decode.js'),
+  '@headlessui/vue': () => import('./headlessui.umd.min.js'),
+  'vue-styled-components': () => import('./vue-styled-components.min.js'),
+
+  // 3. 具備相依鏈的依序加載
+  '@vueuse/core': async () => {
+    await import('./@vueuse/shared/index.iife.min.js');
+    return import('./@vueuse/core/index.iife.min.js');
+  }
 })
 ```
+
+#### 💡 頁面內標準 ESM 匯入（零路徑、純套件名）
+透過 `registerModules` 配置後，在任何 `.vue` 單文件組件中**完全不需要寫任何相對路徑**，直接使用標準裸匯入（Bare Specifier）：
+```vue
+<script setup>
+import jwt_decode from 'jwt-decode'
+import { Dialog, Switch as HSwitch } from '@headlessui/vue'
+import styled from 'vue-styled-components'
+import { useMouse } from '@vueuse/core'
+</script>
+```
+
+#### 🪟 全域變數捕獲比對法（Window Snapshot / Window Diff）
+對於舊時代純 IIFE 或掛在 `window` 上的第三方套件（例如未導出 `module.exports` 的 `jwt-decode.js`）：
+runtime 在執行該模組前後會進行快照比對（`beforeKeys` vs `afterKeys`），**自動偵測並捕獲 window 上新增的屬性作為模組匯出回傳**，大幅提升舊版函式庫的相容性！
+
+#### 🏷️ 瀏覽器 DOM 標籤大小寫自動對齊
+在純瀏覽器端運行時，DOM API 會自動將模板標籤轉為小寫（如 `<DisclosureButton>` 轉為 `<disclosurebutton>`）。runtime 的 Mini Compiler 會自動為匯入的組件註冊：
+1. `PascalCase`（原名）
+2. `lowercase`（全小寫）
+3. `kebab-case`（短橫線命名）
+徹底解決瀏覽器環境下 `Failed to resolve component: disclosurebutton` 等標籤無法解析的問題。
 
 ### `vueEsmRuntime.loadModule(url)`
 

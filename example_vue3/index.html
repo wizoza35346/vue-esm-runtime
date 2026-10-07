@@ -23,6 +23,8 @@
   <!-- vue-esm-runtime -->
   <script src="../dist/vue-esm-runtime.js"></script>
 
+  <!-- 所有第三方庫皆在 main.js 透過 registerModules 規劃按需加載，首頁不載入任何套件 script -->
+
   <script>
     // 註冊外部模組
     vueEsmRuntime.registerModules({

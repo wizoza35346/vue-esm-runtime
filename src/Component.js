@@ -115,12 +115,19 @@ export class Component {
       return vueEsmRuntime.require(resolved);
     };
 
-    return Promise.all([
-      this.template && this.template.compile(),
-      this.script && this.script.compile(childModuleRequire, vueEsmRuntime, this.template ? this.template.getContent() : '')
-        .then(exports => scriptExportsHandler(exports))
-        .then(exports => { this.script.module.exports = exports; }),
-      ...this.styles.map(style => style.compile())
-    ]).then(() => this);
+    const scriptCode = this.script ? this.script.getContent() : '';
+    const preloadPromise = vueEsmRuntime && vueEsmRuntime.preloadScriptDependencies
+      ? vueEsmRuntime.preloadScriptDependencies(scriptCode, this.baseURI)
+      : Promise.resolve();
+
+    return preloadPromise.then(() => {
+      return Promise.all([
+        this.template && this.template.compile(),
+        this.script && this.script.compile(childModuleRequire, vueEsmRuntime, this.template ? this.template.getContent() : '')
+          .then(exports => scriptExportsHandler(exports))
+          .then(exports => { this.script.module.exports = exports; }),
+        ...this.styles.map(style => style.compile())
+      ]).then(() => this);
+    });
   }
 }

@@ -142,3 +142,4 @@ vite.config.ts.timestamp-*
 
 .claude/
 /node_modules
+rollup.headlessui.config.js

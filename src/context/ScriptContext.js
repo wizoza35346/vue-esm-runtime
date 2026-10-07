@@ -332,7 +332,7 @@ export class ScriptContext {
     // import xxx from 'module'
     transformed = transformed.replace(
       /import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/g,
-      (match, name, modulePath) => `const ${name} = require("${modulePath}")`
+      (match, name, modulePath) => `const ${name} = vueEsmRuntime.interopDefault(require("${modulePath}"))`
     );
 
     // import 'module'

@@ -620,12 +620,12 @@ export function compileScriptSetup(code, options = {}) {
     /import\s+(\w+)\s+from\s+['"]([^'"]+\.vue)['"]/g,
     (match, name, path) => {
       vueComponents.push({ name, path });
-      return '// [extracted] ' + match;
+      return '/* [extracted] ' + match + ' */';
     }
   );
 
   transformed = transformed.replace(
-    /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g,
+    /import\s+\{([\s\S]*?)\}\s+from\s+['"]([^'"]+)['"]/g,
     (match, names, path) => {
       const mappedNames = names
         .split(',')
@@ -646,7 +646,7 @@ export function compileScriptSetup(code, options = {}) {
         path,
         type: 'named'
       });
-      return '// [extracted] ' + match;
+      return '/* [extracted] ' + match + ' */';
     }
   );
 
@@ -657,7 +657,7 @@ export function compileScriptSetup(code, options = {}) {
         vueImportNames.add(name);
       }
       imports.push({ names: [name], path, type: 'default' });
-      return '// [extracted] ' + match;
+      return '/* [extracted] ' + match + ' */';
     }
   );
 
@@ -874,6 +874,7 @@ export function compileScriptSetup(code, options = {}) {
 
   // 先生成 cleanedCode 以偵測頂層 await
   const cleanedCode = transformed
+    .replace(/\/\* \[extracted\][\s\S]*?\*\//g, '')
     .split('\n')
     .filter(line => !line.trim().startsWith('// [extracted]'))
     .join('\n')
@@ -984,6 +985,29 @@ export function compileScriptSetup(code, options = {}) {
 
   if (exposeDefinition) {
     componentDef += `    __ctx__.expose(${exposeDefinition});\n`;
+  }
+
+  // 自動將 PascalCase 變數註冊到 instance.type.components（支援原名、全小寫、kebab-case）
+  // 解決瀏覽器 HTML 模板解析將標籤轉為小寫（如 <DisclosureButton> 變成 <disclosurebutton>）導致的組件無法解析問題
+  const pascalBindings = bindings.filter(name => /^[A-Z]/.test(name) && !vueImportNames.has(name));
+  if (pascalBindings.length > 0) {
+    componentDef += '    var __inst__ = typeof Vue !== "undefined" && Vue.getCurrentInstance ? Vue.getCurrentInstance() : null;\n';
+    componentDef += '    if (__inst__ && __inst__.type) {\n';
+    componentDef += '      var __c__ = __inst__.type.components = __inst__.type.components || {};\n';
+    pascalBindings.forEach(name => {
+      const lower = name.toLowerCase();
+      const kebab = name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+      componentDef += `      if (typeof ${name} !== "undefined") {\n`;
+      componentDef += `        __c__["${name}"] = ${name};\n`;
+      if (lower !== name) {
+        componentDef += `        __c__["${lower}"] = ${name};\n`;
+      }
+      if (kebab !== lower && kebab !== name) {
+        componentDef += `        __c__["${kebab}"] = ${name};\n`;
+      }
+      componentDef += `      }\n`;
+    });
+    componentDef += '    }\n';
   }
 
   componentDef += '    return {\n';

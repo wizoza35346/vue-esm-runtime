@@ -38,6 +38,31 @@ export function createAppRouter() {
       path: '/macros',
       name: 'Macros',
       component: () => import('../components/MacroTest.vue')
+    },
+    {
+      path: '/libs',
+      name: 'Libs',
+      component: () => import('../components/LibsTest.vue')
+    },
+    {
+      path: '/jwt',
+      name: 'TestJwt',
+      component: () => import('../components/TestJwt.vue')
+    },
+    {
+      path: '/vueuse',
+      name: 'TestVueUse',
+      component: () => import('../components/TestVueUse.vue')
+    },
+    {
+      path: '/headless',
+      name: 'TestHeadless',
+      component: () => import('../components/TestHeadless.vue')
+    },
+    {
+      path: '/styled',
+      name: 'TestStyled',
+      component: () => import('../components/TestStyled.vue')
     }
   ]
 

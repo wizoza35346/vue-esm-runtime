@@ -54,7 +54,7 @@ function transformESModule(code) {
 
   transformed = transformed.replace(
     /import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/g,
-    (match, name, modulePath) => `const ${name} = require("${modulePath}")`
+    (match, name, modulePath) => `const ${name} = vueEsmRuntime.interopDefault(require("${modulePath}"))`
   );
 
   transformed = transformed.replace(

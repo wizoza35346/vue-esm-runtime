@@ -820,12 +820,12 @@ function compileScriptSetup(code, options = {}) {
     /import\s+(\w+)\s+from\s+['"]([^'"]+\.vue)['"]/g,
     (match, name, path) => {
       vueComponents.push({ name, path });
-      return '// [extracted] ' + match;
+      return '/* [extracted] ' + match + ' */';
     }
   );
 
   transformed = transformed.replace(
-    /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g,
+    /import\s+\{([\s\S]*?)\}\s+from\s+['"]([^'"]+)['"]/g,
     (match, names, path) => {
       const mappedNames = names
         .split(',')
@@ -846,7 +846,7 @@ function compileScriptSetup(code, options = {}) {
         path,
         type: 'named'
       });
-      return '// [extracted] ' + match;
+      return '/* [extracted] ' + match + ' */';
     }
   );
 
@@ -857,7 +857,7 @@ function compileScriptSetup(code, options = {}) {
         vueImportNames.add(name);
       }
       imports.push({ names: [name], path, type: 'default' });
-      return '// [extracted] ' + match;
+      return '/* [extracted] ' + match + ' */';
     }
   );
 
@@ -1074,6 +1074,7 @@ function compileScriptSetup(code, options = {}) {
 
   // 先生成 cleanedCode 以偵測頂層 await
   const cleanedCode = transformed
+    .replace(/\/\* \[extracted\][\s\S]*?\*\//g, '')
     .split('\n')
     .filter(line => !line.trim().startsWith('// [extracted]'))
     .join('\n')
@@ -1184,6 +1185,29 @@ function compileScriptSetup(code, options = {}) {
 
   if (exposeDefinition) {
     componentDef += `    __ctx__.expose(${exposeDefinition});\n`;
+  }
+
+  // 自動將 PascalCase 變數註冊到 instance.type.components（支援原名、全小寫、kebab-case）
+  // 解決瀏覽器 HTML 模板解析將標籤轉為小寫（如 <DisclosureButton> 變成 <disclosurebutton>）導致的組件無法解析問題
+  const pascalBindings = bindings.filter(name => /^[A-Z]/.test(name) && !vueImportNames.has(name));
+  if (pascalBindings.length > 0) {
+    componentDef += '    var __inst__ = typeof Vue !== "undefined" && Vue.getCurrentInstance ? Vue.getCurrentInstance() : null;\n';
+    componentDef += '    if (__inst__ && __inst__.type) {\n';
+    componentDef += '      var __c__ = __inst__.type.components = __inst__.type.components || {};\n';
+    pascalBindings.forEach(name => {
+      const lower = name.toLowerCase();
+      const kebab = name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+      componentDef += `      if (typeof ${name} !== "undefined") {\n`;
+      componentDef += `        __c__["${name}"] = ${name};\n`;
+      if (lower !== name) {
+        componentDef += `        __c__["${lower}"] = ${name};\n`;
+      }
+      if (kebab !== lower && kebab !== name) {
+        componentDef += `        __c__["${kebab}"] = ${name};\n`;
+      }
+      componentDef += `      }\n`;
+    });
+    componentDef += '    }\n';
   }
 
   componentDef += '    return {\n';
@@ -1534,7 +1558,7 @@ class ScriptContext {
     // import xxx from 'module'
     transformed = transformed.replace(
       /import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/g,
-      (match, name, modulePath) => `const ${name} = require("${modulePath}")`
+      (match, name, modulePath) => `const ${name} = vueEsmRuntime.interopDefault(require("${modulePath}"))`
     );
 
     // import 'module'
@@ -1894,13 +1918,20 @@ class Component {
       return vueEsmRuntime.require(resolved);
     };
 
-    return Promise.all([
-      this.template && this.template.compile(),
-      this.script && this.script.compile(childModuleRequire, vueEsmRuntime, this.template ? this.template.getContent() : '')
-        .then(exports$1 => scriptExportsHandler(exports$1))
-        .then(exports$1 => { this.script.module.exports = exports$1; }),
-      ...this.styles.map(style => style.compile())
-    ]).then(() => this);
+    const scriptCode = this.script ? this.script.getContent() : '';
+    const preloadPromise = vueEsmRuntime && vueEsmRuntime.preloadScriptDependencies
+      ? vueEsmRuntime.preloadScriptDependencies(scriptCode, this.baseURI)
+      : Promise.resolve();
+
+    return preloadPromise.then(() => {
+      return Promise.all([
+        this.template && this.template.compile(),
+        this.script && this.script.compile(childModuleRequire, vueEsmRuntime, this.template ? this.template.getContent() : '')
+          .then(exports$1 => scriptExportsHandler(exports$1))
+          .then(exports$1 => { this.script.module.exports = exports$1; }),
+        ...this.styles.map(style => style.compile())
+      ]).then(() => this);
+    });
   }
 }
 
@@ -1980,17 +2011,135 @@ function loadComponentAsync(url, name) {
   return loader;
 }
 
+// 正在非同步載入中的模組 Promise 快取
+const loadingModules = {};
+
 /**
  * 註冊外部模組
  */
 function registerModule(name, module) {
+  if (typeof module === 'function' && module.length === 0) {
+    module.__isAsyncFactory = true;
+  }
   externalModules[name] = module;
 }
 
 function registerModules(mods) {
   for (const name in mods) {
-    externalModules[name] = mods[name];
+    registerModule(name, mods[name]);
   }
+}
+
+/**
+ * 非同步解析單一模組（支援 () => import(...)、Promise 或路徑字串）
+ */
+function resolveAsyncModule(name) {
+  if (!name) return Promise.resolve();
+  if (!(name in externalModules)) return Promise.resolve();
+
+  // 若該模組正在載入中，直接共用同一個 Promise
+  if (name in loadingModules) {
+    return loadingModules[name];
+  }
+
+  const entry = externalModules[name];
+  if (!entry) return Promise.resolve();
+
+  // 若 entry 是 Promise
+  if (typeof entry.then === 'function') {
+    const p = entry.then(resolved => {
+      const finalMod = (resolved !== undefined && Object.keys(resolved || {}).length > 0)
+        ? resolved
+        : (findGlobalModule(name) || resolved);
+      const normalized = normalizeExport(finalMod);
+      externalModules[name] = normalized;
+      delete loadingModules[name];
+      return normalized;
+    }).catch(err => {
+      delete loadingModules[name];
+      throw err;
+    });
+    loadingModules[name] = p;
+    return p;
+  }
+
+  // 若 entry 是加載工廠函式 (() => import(...) 或 async () => ...)
+  if (typeof entry === 'function' && (entry.__isAsyncFactory || entry.length === 0)) {
+    try {
+      const ret = entry();
+      if (ret && typeof ret.then === 'function') {
+        const p = ret.then(resolved => {
+          const finalMod = (resolved !== undefined && Object.keys(resolved || {}).length > 0)
+            ? resolved
+            : (findGlobalModule(name) || resolved);
+          const normalized = normalizeExport(finalMod);
+          externalModules[name] = normalized;
+          delete loadingModules[name];
+          return normalized;
+        }).catch(err => {
+          delete loadingModules[name];
+          throw err;
+        });
+        loadingModules[name] = p;
+        return p;
+      } else {
+        const normalized = normalizeExport(ret);
+        externalModules[name] = normalized;
+        return Promise.resolve(normalized);
+      }
+    } catch (e) {
+      delete loadingModules[name];
+      console.error('[vue-esm-runtime] Failed to execute module factory for:', name, e);
+      return Promise.reject(e);
+    }
+  }
+
+  // 若 entry 是字串路徑
+  if (typeof entry === 'string' && (entry.endsWith('.js') || entry.startsWith('./') || entry.startsWith('../'))) {
+    const p = loadModule(entry).then(resolved => {
+      const finalMod = (resolved !== undefined && Object.keys(resolved || {}).length > 0)
+        ? resolved
+        : (findGlobalModule(name) || resolved);
+      const normalized = normalizeExport(finalMod);
+      externalModules[name] = normalized;
+      delete loadingModules[name];
+      return normalized;
+    }).catch(err => {
+      delete loadingModules[name];
+      throw err;
+    });
+    loadingModules[name] = p;
+    return p;
+  }
+
+  return Promise.resolve(entry);
+}
+
+/**
+ * 預先加載腳本依賴中的所有非同步模組
+ */
+function preloadScriptDependencies(code, baseURI) {
+  if (!code || typeof code !== 'string') return Promise.resolve();
+
+  const importRegex = /import\s+(?:(?:[\w*\s{},]*)\s+from\s+)?['"]([^'"]+)['"]/g;
+  const dependencies = new Set();
+  let match;
+
+  while ((match = importRegex.exec(code)) !== null) {
+    const specifier = match[1];
+    if (!specifier.endsWith('.vue')) {
+      dependencies.add(specifier);
+    }
+  }
+
+  const promises = [];
+  dependencies.forEach(name => {
+    if (name in externalModules) {
+      promises.push(resolveAsyncModule(name));
+    }
+  });
+
+  return Promise.all(promises);
 }
 
 function setScriptSetupCompiler(compiler) {
@@ -2047,7 +2196,7 @@ function loadModule(url, baseURI) {
       if (path.startsWith('./') || path.startsWith('../')) {
         return `const ${name} = vueEsmRuntime.interopDefault(await vueEsmRuntime.loadModule("${path}", __baseURI__))`;
       }
-      return `const ${name} = require("${path}")`;
+      return `const ${name} = vueEsmRuntime.interopDefault(require("${path}"))`;
     });
 
     // 偵測是否同時有 default 與具名匯出，決定 default 的轉換策略
@@ -2078,18 +2227,24 @@ function loadModule(url, baseURI) {
       code = 'return (async function() {\n' + code + '\n})()';
     }
 
-    const fn = Function('module', 'exports', 'require', 'vueEsmRuntime', '__baseURI__', code);
-    const result = fn(moduleObj, moduleObj.exports, requireModule, vueEsmRuntime$1, moduleBaseURI);
+    return preloadScriptDependencies(code).then(() => {
+      const beforeKeys = typeof window !== 'undefined' ? Object.keys(window) : [];
+      const globalScope = typeof window !== 'undefined' ? window : moduleObj.exports;
+      const fn = Function('module', 'exports', 'require', 'vueEsmRuntime', '__baseURI__', code);
+      const result = fn.call(globalScope, moduleObj, moduleObj.exports, requireModule, vueEsmRuntime$1, moduleBaseURI);
 
-    if (result && typeof result.then === 'function') {
-      return result.then(() => {
-        externalModules[resolvedURL] = moduleObj.exports;
-        return moduleObj.exports;
-      });
-    }
+      if (result && typeof result.then === 'function') {
+        return result.then(() => {
+          captureWindowDiff(beforeKeys, moduleObj, resolvedURL);
+          externalModules[resolvedURL] = moduleObj.exports;
+          return moduleObj.exports;
+        });
+      }
 
-    externalModules[resolvedURL] = moduleObj.exports;
-    return moduleObj.exports;
+      captureWindowDiff(beforeKeys, moduleObj, resolvedURL);
+      externalModules[resolvedURL] = moduleObj.exports;
+      return moduleObj.exports;
+    });
   });
 }
 
@@ -2100,6 +2255,134 @@ function loadModule(url, baseURI) {
  */
 function interopDefault(mod) {
   return mod && mod.__esModule ? mod.default : mod;
+}
+
+/**
+ * 智慧全域模組搜尋 (Smart Global Module Resolver)
+ * 當 require('套件名') 在 externalModules 查不到時，自動嘗試從 window 匹配相應的全域變數
+ */
+function findGlobalModule(name) {
+  if (typeof window === 'undefined' || !name) return undefined;
+
+  // 1. 直接命中
+  if (name in window && window[name] !== undefined) {
+    return window[name];
+  }
+
+  // 2. 常見熱門套件別名映射 (Known Aliases)
+  const ALIASES = {
+    'vue': ['Vue'],
+    'vue-router': ['VueRouter', 'vueRouter'],
+    'jwt-decode': ['jwt_decode', 'jwtDecode'],
+    'vue-styled-components': ['styledV', 'styled'],
+    'styled-components': ['styledV', 'styled'],
+    '@headlessui/vue': ['headlessui', 'HeadlessUI'],
+    'headlessui': ['headlessui', 'HeadlessUI'],
+    '@vueuse/core': ['VueUse', 'vueuse'],
+    '@vueuse/shared': ['VueUse', 'vueuse'],
+    'vueuse': ['VueUse', 'vueuse'],
+    'axios': ['axios', 'Axios'],
+    'lodash': ['lodash', '_', 'Lodash'],
+    'sweetalert2': ['Swal', 'sweetalert2'],
+    'bootstrap': ['bootstrap', 'Bootstrap']
+  };
+
+  const directAliases = ALIASES[name];
+  if (directAliases) {
+    for (let i = 0; i < directAliases.length; i++) {
+      const alias = directAliases[i];
+      if (alias in window && window[alias] !== undefined) {
+        return window[alias];
+      }
+    }
+  }
+
+  // 3. 通用命名規則自動轉換 (Rule-based Conversion)
+  const cleanName = name.replace(/^@[^/]+\//, '');
+  const baseName = name.includes('/') ? name.split('/')[0].replace(/^@/, '') : name;
+
+  const candidates = [
+    // 連字號轉底線: 'jwt-decode' -> 'jwt_decode'
+    name.replace(/-/g, '_'),
+    cleanName.replace(/-/g, '_'),
+    baseName.replace(/-/g, '_'),
+    // 連字號轉駝峰: 'jwt-decode' -> 'jwtDecode'
+    name.replace(/-([a-z0-9])/gi, (_, c) => c.toUpperCase()),
+    cleanName.replace(/-([a-z0-9])/gi, (_, c) => c.toUpperCase()),
+    baseName.replace(/-([a-z0-9])/gi, (_, c) => c.toUpperCase()),
+    // 首字母大寫 (PascalCase): 'vue' -> 'Vue', 'vue-router' -> 'VueRouter'
+    name.charAt(0).toUpperCase() + name.slice(1).replace(/-([a-z0-9])/gi, (_, c) => c.toUpperCase()),
+    cleanName.charAt(0).toUpperCase() + cleanName.slice(1).replace(/-([a-z0-9])/gi, (_, c) => c.toUpperCase()),
+    baseName.charAt(0).toUpperCase() + baseName.slice(1).replace(/-([a-z0-9])/gi, (_, c) => c.toUpperCase())
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
+    if (candidate && candidate in window && window[candidate] !== undefined) {
+      return window[candidate];
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * 導出正規化 (Normalize Export)
+ * 處理特殊 UMD 導出結構（例如 vue-styled-components: 自身為物件，但 default 屬性是核心函式）
+ */
+function normalizeExport(mod) {
+  if (!mod) return mod;
+  if (typeof mod === 'object' && typeof mod.default === 'function' && typeof mod !== 'function') {
+    const fn = mod.default;
+    const merged = function () {
+      return fn.apply(this, arguments);
+    };
+    Object.assign(merged, fn, mod);
+    merged.default = merged;
+    return merged;
+  }
+  return mod;
+}
+
+/**
+ * 全域變數捕獲 (Window Diff / Snapshot)
+ * 針對純 IIFE / UMD 檔案（內部未寫 module.exports，僅掛在 window 上的腳本，例如 jwt-decode.js）
+ * 在執行前後比對 window 新增的 key，自動捕獲為模組導出回傳
+ */
+function captureWindowDiff(beforeKeys, moduleObj, url) {
+  if (typeof window === 'undefined' || !beforeKeys || !moduleObj) return;
+
+  const isExportsEmpty =
+    moduleObj.exports &&
+    typeof moduleObj.exports === 'object' &&
+    !Array.isArray(moduleObj.exports) &&
+    Object.keys(moduleObj.exports).length === 0;
+
+  if (!isExportsEmpty) return;
+
+  const afterKeys = Object.keys(window);
+  const diffKeys = afterKeys.filter(k => !beforeKeys.includes(k));
+
+  if (diffKeys.length === 1) {
+    moduleObj.exports = normalizeExport(window[diffKeys[0]]);
+  } else if (diffKeys.length > 1) {
+    // 若有多個新增屬性，優先比對與檔名相近的 key
+    const fileName = url ? url.split('?')[0].split('/').pop().replace(/(\.min)?\.js$/, '') : '';
+    const cleanFileName = fileName.toLowerCase().replace(/[-_@.]/g, '');
+    const matched = diffKeys.find(k => {
+      const cleanKey = k.toLowerCase().replace(/[-_]/g, '');
+      return cleanKey.includes(cleanFileName) || cleanFileName.includes(cleanKey);
+    });
+    const selectedKey = matched || diffKeys[diffKeys.length - 1];
+    moduleObj.exports = normalizeExport(window[selectedKey]);
+  } else if (url) {
+    // 若 diffKeys 為空（表示先前可能已被載入過或已存在 window），根據檔名嘗試從全域智慧查找
+    const fileName = url.split('?')[0].split('/').pop().replace(/(\.min)?\.js$/, '');
+    const found = findGlobalModule(fileName);
+    if (found !== undefined) {
+      moduleObj.exports = normalizeExport(found);
+    }
+  }
 }
 
 /**
@@ -2116,9 +2399,12 @@ function requireModule(moduleName) {
     return modules[moduleName];
   }
 
-  // window 全域變數
-  if (typeof window !== 'undefined' && moduleName in window) {
-    return window[moduleName];
+  // 嘗試從 window 或智慧別名查找
+  const globalMod = findGlobalModule(moduleName);
+  if (globalMod !== undefined) {
+    const normalized = normalizeExport(globalMod);
+    externalModules[moduleName] = normalized;
+    return normalized;
   }
 
   // 若為 .vue 模組路徑，回傳組件定義
@@ -2176,7 +2462,10 @@ function requireModule(moduleName) {
           return requireModule(path);
         };
 
-        Function('module', 'exports', 'require', 'vueEsmRuntime', code)(moduleObj, moduleObj.exports, wrappedRequire, vueEsmRuntime$1);
+        const beforeKeys = typeof window !== 'undefined' ? Object.keys(window) : [];
+        const globalScope = typeof window !== 'undefined' ? window : moduleObj.exports;
+        Function('module', 'exports', 'require', 'vueEsmRuntime', code).call(globalScope, moduleObj, moduleObj.exports, wrappedRequire, vueEsmRuntime$1);
+        captureWindowDiff(beforeKeys, moduleObj, jsUrl);
 
         externalModules[moduleName] = moduleObj.exports;
         return moduleObj.exports;
@@ -2223,6 +2512,8 @@ vueEsmRuntime$1.require = requireModule;
 vueEsmRuntime$1.resolveURL = resolveURL;
 vueEsmRuntime$1.httpRequest = httpRequest;
 vueEsmRuntime$1.interopDefault = interopDefault;
+vueEsmRuntime$1.resolveAsyncModule = resolveAsyncModule;
+vueEsmRuntime$1.preloadScriptDependencies = preloadScriptDependencies;
 
 // 在 vueEsmRuntime 定義後，掛載相容性方法
 vueEsmRuntime$1.load = loadComponent;
