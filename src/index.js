@@ -84,7 +84,9 @@ const loadingModules = {};
  * 註冊外部模組
  */
 function registerModule(name, module) {
-  if (typeof module === 'function' && module.length === 0) {
+  // 載入函式 (() => import(...) 或 async () => ...) 是箭頭函式 / async 函式，沒有 prototype；
+  // axios、SweetAlert 這類「本身就是函式的模組」是一般函式 (有 prototype)，不能被當成載入函式執行
+  if (typeof module === 'function' && module.length === 0 && !('prototype' in module)) {
     module.__isAsyncFactory = true;
   }
   externalModules[name] = module;
@@ -130,7 +132,7 @@ function resolveAsyncModule(name) {
   }
 
   // 若 entry 是加載工廠函式 (() => import(...) 或 async () => ...)
-  if (typeof entry === 'function' && (entry.__isAsyncFactory || entry.length === 0)) {
+  if (typeof entry === 'function' && entry.__isAsyncFactory) {
     try {
       const ret = entry();
       if (ret && typeof ret.then === 'function') {
@@ -220,14 +222,19 @@ function loadModule(url, baseURI) {
   const resolvedURL = baseURI ? resolveURL(baseURI, url) : url;
 
   if (resolvedURL in externalModules) {
-    return Promise.resolve(externalModules[resolvedURL]);
+    // 若是尚未載入的 registerModules 載入函式，先載入完成再回傳
+    return resolveAsyncModule(resolvedURL).then(function () {
+      return externalModules[resolvedURL];
+    });
   }
 
   const moduleBaseURI = resolvedURL.substr(0, resolvedURL.lastIndexOf('/') + 1);
 
   return httpRequest(resolvedURL).then(code => {
-    const moduleObj = { exports: {} };
-    const hasAsyncImport = /import\s+[\w{].*from\s+['"]\..*['"]/.test(code);
+    // 在改寫 import 之前預先加載依賴，確保能掃描到原始 import 語法中的非同步模組
+    return preloadScriptDependencies(code, moduleBaseURI).then(() => {
+      const moduleObj = { exports: {} };
+      const hasAsyncImport = /import\s+[\w{].*from\s+['"]\..*['"]/.test(code);
 
     // 動態 import() 轉換
     code = code.replace(
@@ -293,24 +300,23 @@ function loadModule(url, baseURI) {
       code = 'return (async function() {\n' + code + '\n})()';
     }
 
-    return preloadScriptDependencies(code, moduleBaseURI).then(() => {
-      const beforeKeys = typeof window !== 'undefined' ? Object.keys(window) : [];
-      const globalScope = typeof window !== 'undefined' ? window : moduleObj.exports;
-      const fn = Function('module', 'exports', 'require', 'vueEsmRuntime', '__baseURI__', code);
-      const result = fn.call(globalScope, moduleObj, moduleObj.exports, requireModule, vueEsmRuntime, moduleBaseURI);
+    const beforeKeys = typeof window !== 'undefined' ? Object.keys(window) : [];
+    const globalScope = typeof window !== 'undefined' ? window : moduleObj.exports;
+    const fn = Function('module', 'exports', 'require', 'vueEsmRuntime', '__baseURI__', code);
+    const result = fn.call(globalScope, moduleObj, moduleObj.exports, requireModule, vueEsmRuntime, moduleBaseURI);
 
-      if (result && typeof result.then === 'function') {
-        return result.then(() => {
-          captureWindowDiff(beforeKeys, moduleObj, resolvedURL);
-          externalModules[resolvedURL] = moduleObj.exports;
-          return moduleObj.exports;
-        });
-      }
+    if (result && typeof result.then === 'function') {
+      return result.then(() => {
+        captureWindowDiff(beforeKeys, moduleObj, resolvedURL);
+        externalModules[resolvedURL] = moduleObj.exports;
+        return moduleObj.exports;
+      });
+    }
 
-      captureWindowDiff(beforeKeys, moduleObj, resolvedURL);
-      externalModules[resolvedURL] = moduleObj.exports;
-      return moduleObj.exports;
-    });
+    captureWindowDiff(beforeKeys, moduleObj, resolvedURL);
+    externalModules[resolvedURL] = moduleObj.exports;
+    return moduleObj.exports;
+  });
   });
 }
 
