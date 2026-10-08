@@ -2170,6 +2170,15 @@ function loadModule(url, baseURI) {
       const moduleObj = { exports: {} };
       const hasAsyncImport = /import\s+[\w{].*from\s+['"]\..*['"]/.test(code);
 
+      // 針對 IIFE 形式套件（如 Vue、VueRouter 全域 bundle：var Vue = (function...)）
+      // 自動改寫為 globalThis[VarName] = module.exports = ...，確保同時掛到 window 上並由 loadModule 導出
+      code = code.replace(
+      /^((?:\s*\/\*[\s\S]*?\*\/\s*|\s*\/\/[^\n]*\n\s*)*)var\s+([A-Za-z0-9_$]+)\s*=\s*(?=\(|\s*function)/,
+      (match, comments, varName) => {
+        return `${comments}(typeof window !== 'undefined' ? window : globalThis).${varName} = module.exports = `;
+      }
+    );
+
     // 動態 import() 轉換
     code = code.replace(
       /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
