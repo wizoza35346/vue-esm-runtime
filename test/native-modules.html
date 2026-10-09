@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>nativeModules / onProgress 測試</title>
+  <style>body{font:13px/1.6 monospace;margin:12px} .pass{color:#16a34a} .fail{color:#dc2626} pre{white-space:pre-wrap}</style>
+</head>
+<body>
+<!--
+  驗證 vueEsmRuntime.options.nativeModules 與 options.onProgress（和 react-esm-runtime 對齊的功能）。
+  用法：npm run build 之後，用專案根目錄當 http-server 的根目錄，開 http://localhost:8080/test/native-modules.html
+  頁面底部會顯示 ALL PASSED（失敗時顯示 FAILED 與原因）。需要 HTTP，不能用 file://
+-->
+<pre id="result">running...</pre>
+
+<script src="../node_modules/vue/dist/vue.global.js"></script>
+<script src="../dist/vue-esm-runtime.js"></script>
+<script>
+(async function () {
+  const out = [];
+  let failed = 0;
+  const check = (name, ok, extra) => { out.push((ok ? 'PASS ' : 'FAIL ') + name + (ok ? '' : '\n     ' + (extra || ''))); if (!ok) failed++; };
+  const base = location.href.replace(/[^/]*$/, '') + 'fixtures/';          // http://…/test/fixtures/
+  const rt = vueEsmRuntime;
+  rt.registerModules({ vue: Vue });
+
+  // 記錄 runtime 用 httpRequest 抓了哪些文字（原生載入的檔案不應該出現在這裡）
+  const requested = [];
+  rt.httpRequest = url => { requested.push(url.replace(/^\.\/fixtures\//, '')); return fetch(url).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + url); return r.text(); }); };
+  const events = [];
+  rt.options.onProgress = e => events.push(e.type + ':' + e.url.replace(base, ''));
+  rt.options.nativeModules = '/test/fixtures/native/';
+
+  // 1) 靜態 import 原生模組
+  const m1 = await rt.loadModule('./fixtures/app/static.js');
+  check('靜態 import 原生模組：default 與具名匯出（函式可呼叫）', JSON.stringify(m1.result) === '["lib-default",1,2]', JSON.stringify(m1.result));
+  check('原生檔案沒有被 runtime 抓文字（httpRequest 沒被呼叫）', !requested.some(u => u.startsWith('native/')), JSON.stringify(requested));
+  check('原生檔案只載入一次', window.__libLoads === 1, String(window.__libLoads));
+
+  // 2) 動態 import()：與靜態 import 共用同一份 module
+  const lib2 = await (await rt.loadModule('./fixtures/app/dynamic.js')).load();
+  check('import() 原生模組（它自己再 import 另一個原生模組）：與先前共用同一份 lib.js', lib2.twice() === 4 && window.__libLoads === 1, JSON.stringify([lib2.twice(), window.__libLoads]));
+
+  // 3) 進度通知
+  check('onProgress：原生檔案有 start 與 ready（start 只有原生載入才有）', events.includes('start:native/lib.js') && events.includes('ready:native/lib.js') && events.includes('ready:native/lib2.js'), JSON.stringify(events));
+  check('onProgress：runtime 載入的 .js 檔案有 ready', events.includes('ready:app/static.js') && events.includes('ready:app/dynamic.js'), JSON.stringify(events));
+
+  // 4) 不符合的檔案照常由 runtime 載入
+  const plain = await rt.loadModule('./fixtures/app/plain.js');
+  check('不符合的檔案照常由 runtime 抓文字與改寫', plain.plain === 'plain' && requested.includes('app/plain.js'), JSON.stringify(requested));
+
+  // 5) 用 registerModules 的載入函式登記成名稱（main.js 的用法），頁面只 import '名稱'
+  rt.registerModules((await rt.loadModule('./fixtures/app/boot.js')).reg);
+  const bare = await rt.loadModule('./fixtures/app/bare.js');
+  check('() => import(原生模組) 登記成名稱後，頁面 import 名稱拿到的就是它', bare.value === 'lib-default', JSON.stringify(bare.value));
+
+  // 6) 指定方式：字串、陣列、RegExp、函式
+  for (const [label, spec, file, expected] of [
+    ['字串', '/test/fixtures/native/', 'str', 'a'],
+    ['陣列', ['/nope/', '/test/fixtures/native/'], 'arr', 'b'],
+    ['RegExp', /\/native\/c\.js$/, 're', 'c'],
+    ['函式', url => url.endsWith('/native/d.js'), 'fn', 'd']
+  ]) {
+    rt.options.nativeModules = spec;
+    const before = requested.length;
+    const m = await rt.loadModule('./fixtures/app/' + file + '.js');
+    const v = m && m.__esModule ? m.default : m;
+    check('nativeModules 用' + label + '指定', v === expected && !requested.slice(before).some(u => u.startsWith('native/')), JSON.stringify([v, requested.slice(before)]));
+  }
+  rt.options.nativeModules = '/test/fixtures/native/';
+
+  // 7) 失敗：錯誤指名網址，通知 error
+  events.length = 0;
+  let msg = '';
+  await (await rt.loadModule('./fixtures/app/missing.js')).load().catch(e => { msg = e.message; });
+  check('原生載入失敗：reject 並指出網址', /原生載入失敗/.test(msg) && /not-there\.js/.test(msg), msg);
+  check('原生載入失敗：onProgress 通知 error', events.includes('error:native/not-there.js'), JSON.stringify(events));
+
+  // 8) onProgress 的回呼自己丟錯，不能讓載入失敗
+  rt.options.onProgress = () => { throw new Error('UI crashed'); };
+  const again = await rt.loadModule('./fixtures/app/plain.js').then(() => true, () => false);
+  check('onProgress 丟出錯誤不會影響載入', again);
+
+  // 9) 真實的第三方套件：Vue 官方的原生 ESM 版本（vue.esm-browser.prod.js），用 nativeModules 原生載入並真的掛載元件
+  rt.options.nativeModules = ['/test/fixtures/native/', '/node_modules/vue/dist/vue.esm-browser'];
+  rt.options.onProgress = e => events.push(e.type + ':' + e.url.replace(location.origin, ''));
+  events.length = 0;
+  const vueEsm = await rt.loadModule('./fixtures/app/vue-esm.js');
+  const host = document.createElement('div');
+  vueEsm.mount(host);
+  check('Vue 官方的原生 ESM（vue.esm-browser.prod.js）由瀏覽器載入，並能建立、掛載元件', host.textContent === 'esm-vue-ok', host.innerHTML);
+  check('這個 ESM 檔案沒有被 runtime 抓文字、改寫（只有原生載入的 start / ready）', !requested.some(u => /vue\.esm-browser/.test(u)) && events.some(e => /^start:.*vue\.esm-browser\.prod\.js/.test(e)) && events.some(e => /^ready:.*vue\.esm-browser\.prod\.js/.test(e)), JSON.stringify(events));
+
+  out.push('');
+  out.push(failed ? 'FAILED: ' + failed : 'ALL PASSED');
+  document.getElementById('result').innerHTML = out.map(l => '<span class="' + (/^PASS/.test(l) ? 'pass' : /^FAIL|FAILED/.test(l) ? 'fail' : '') + '">' + l.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</span>').join('\n');
+  window.__failed = failed;
+  window.__lines = out;
+  window.__done = true;
+})().catch(function (e) {
+  document.getElementById('result').textContent = 'FAILED: ' + (e && e.stack || e);
+  window.__failed = 1; window.__lines = ['FAILED: ' + (e && e.stack || e)]; window.__done = true;
+});
+</script>
+</body>
+</html>

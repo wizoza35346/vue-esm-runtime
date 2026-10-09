@@ -12,6 +12,8 @@
 - **Vue 2.7+ / Vue 3 相容** - 自動偵測並適配 Vue 版本
 - **Scoped CSS** - 支援 `<style scoped>` 樣式隔離
 - **Vue Router 整合** - 支援動態 `import()` 語法進行路由懶載入
+- **原生 ESM 套件** - `options.nativeModules` 指定的網址由瀏覽器原生載入，不抓文字、不改寫（見下方）
+- **載入進度通知** - `options.onProgress` 回報每個模組的開始 / 就緒 / 失敗
 
 ## 安裝
 
@@ -237,6 +239,47 @@ runtime 在執行該模組前後會進行快照比對（`beforeKeys` vs `afterKe
 2. `lowercase`（全小寫）
 3. `kebab-case`（短橫線命名）
 徹底解決瀏覽器環境下 `Failed to resolve component: disclosurebutton` 等標籤無法解析的問題。
+
+### `vueEsmRuntime.options`
+
+| 選項 | 預設 | 說明 |
+|------|------|------|
+| `nativeModules` | `null` | 由瀏覽器**原生**載入、不經過 runtime 抓文字與改寫的檔案（必須是 ES module）：網址片段（字串或陣列）、`RegExp`、或 `(url) => boolean`。比對的是**絕對網址**。必須有明確的副檔名 |
+| `onProgress` | `null` | 載入進度通知：每個 `.js` / `.vue` 模組「就緒」或失敗時呼叫 `({ type: 'ready' \| 'error', url, error })`；原生載入的檔案另外會在開始時通知 `{ type: 'start', url }`。`url` 一律是絕對網址；回呼自己丟出的錯誤不會影響載入 |
+
+#### 🌐 原生 ESM 套件（`options.nativeModules`）
+
+`loadModule` 預設是把檔案當**文字**抓回來，用正則改寫 `import` / `export` 後再執行，所以第三方套件通常要是 UMD / IIFE。
+如果套件本身就是**原生 ES module**（有 `import` / `export`），可以告訴 runtime 把這些網址交給瀏覽器原生載入：
+
+```javascript
+vueEsmRuntime.options.nativeModules = '/vendor/'     // 字串、字串陣列、RegExp、函式都可以
+
+vueEsmRuntime.registerModules({
+  // 符合 nativeModules 的網址：不抓文字、不改寫，由瀏覽器用原生 import() 載入
+  'some-esm-lib': () => import('./vendor/some-esm-lib.js')
+})
+```
+
+- 不論是靜態的 `import x from './vendor/a.js'`、動態的 `import('./vendor/a.js')`，還是 `registerModules` 的載入函式，拿到的都是同一份原生載入的結果。
+- 原生模組之間的 `import`（例如 `antd.js` 引用 `./react.js`）完全由瀏覽器處理，依網址去重。
+- ES module namespace 會複製成一般物件並標記 `__esModule`，所以 `import X from` 取 `.default`、`import { a } from` 取具名匯出（與其他模組一致）。**複製的是當下的值，不保留 live binding**。
+- **只能用 `import()` / `loadModule` 載入**：同步的 `require` 沒辦法載入原生模組（沒有預先載入過會明確報錯，不會去同步 XHR 抓文字）。
+- 同一個網址只會原生載入一次；載入失敗時錯誤訊息會指出網址，之後可以重試。
+
+已驗證：用 `nativeModules` 載入 **Vue 3.5 官方的瀏覽器版 ESM**（`vue/dist/vue.esm-browser.prod.js`，自成一體、沒有裸名稱 import），能由 runtime 載入並真的建立、掛載元件（見 `test/native-modules.html`）。
+注意：runtime 自己（`loadComponentAsync`、`install`）會讀**全域** `Vue`，所以 `vue` 本身建議仍然用全域的 `Vue` 註冊；`nativeModules` 適合其他第三方套件。
+
+#### 📡 載入進度（`options.onProgress`）
+
+```javascript
+vueEsmRuntime.options.onProgress = ({ type, url, error }) => {
+  console.log(type, url)     // 'start'（只有原生載入）/ 'ready' / 'error'
+}
+```
+
+一般的 `.js` / `.vue` 沒有 `start`：runtime 抓檔案時會呼叫 `vueEsmRuntime.httpRequest`，需要「開始」的通知可以自己包住它。
+可以拿來做載入進度條、載入清單，或記錄每個檔案的載入時間。
 
 ### `vueEsmRuntime.loadModule(url)`
 

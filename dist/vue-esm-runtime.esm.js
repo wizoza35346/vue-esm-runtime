@@ -1947,6 +1947,94 @@ const modules = {};
 // 外部模組註冊表
 const externalModules = {};
 
+// 選項（與 react-esm-runtime 對齊）
+const options = {
+  // 由瀏覽器「原生」載入、不經過 runtime 轉換的檔案（它們必須是 ES module）。
+  // 可以是網址片段（字串或陣列）、RegExp、或 (url) => boolean。例如 '/vendor/'：
+  // 這個目錄底下的第三方 ESM 套件不抓文字、不用正則改寫，直接用原生 import() 載入，
+  // 之後不論是 import … from './vendor/x.js' 還是 import('./vendor/x.js')，拿到的都是原生載入的結果。必須有明確的副檔名
+  nativeModules: null,
+  // 載入進度通知（選用）：每個 .js / .vue 模組「就緒」或失敗時呼叫 ({ type: 'ready' | 'error', url, error })；
+  // 原生載入的檔案另外會在開始時通知 { type: 'start', url }（它們不經過 httpRequest）。
+  // 回呼自己丟出的錯誤不會影響載入。
+  onProgress: null
+};
+
+// 用 Function 包起來，避免打包工具把 import() 改寫成 require/AMD
+const dynamicImport = new Function('u', 'return import(u)');
+
+// 網址是否符合「網址片段（字串或陣列）、RegExp、(url) => boolean」的指定
+function matchesURL(spec, url) {
+  if (!spec) return false;
+  return (Array.isArray(spec) ? spec : [spec]).some(m =>
+    typeof m === 'function' ? !!m(url) : m instanceof RegExp ? m.test(url) : url.indexOf(String(m)) >= 0
+  );
+}
+
+// vue-esm-runtime 的模組網址常常是頁面相對路徑（./js/x.js）。比對（nativeModules）、原生 import()、進度通知都改用絕對網址，
+// 這樣設定 '/vendor/' 或 /^https:\/\/cdn\./ 才符合直覺，原生 import() 也不用依賴 new Function 裡相對路徑的解析方式
+function absoluteURL(url) {
+  try {
+    return typeof document !== 'undefined' ? new URL(url, document.baseURI).href : url;
+  } catch (e) {
+    return url;
+  }
+}
+
+function isNativeURL(url) {
+  return matchesURL(options.nativeModules, absoluteURL(url));
+}
+
+function notify(type, url, error) {
+  if (typeof options.onProgress !== 'function') return;
+  try {
+    options.onProgress({ type, url: absoluteURL(url), error });
+  } catch (e) {
+    /* UI 的問題不該讓載入失敗 */
+  }
+}
+
+// 把「載入中的 Promise」接上進度通知：就緒 / 失敗各通知一次
+function trackLoad(url, promise) {
+  return promise.then(
+    result => { notify('ready', url); return result; },
+    err => { notify('error', url, err); throw err; }
+  );
+}
+
+// ES module namespace 是唯讀的，也沒有 __esModule：複製成一般物件並標記，
+// 讓 import X from … 取 .default（interopDefault）、import { a } from … 取具名匯出
+function nativeExports(ns) {
+  if (ns && ns[Symbol.toStringTag] === 'Module') {
+    const copy = Object.assign({}, ns);
+    Object.defineProperty(copy, '__esModule', { value: true });
+    return copy;
+  }
+  return ns;
+}
+
+// 原生載入的檔案：同一個網址只載入一次
+const nativeLoads = {};
+
+function loadNativeModule(url) {
+  if (url in nativeLoads) return nativeLoads[url];
+  notify('start', url);
+  nativeLoads[url] = dynamicImport(absoluteURL(url)).then(
+    ns => {
+      const exports$1 = nativeExports(ns);
+      externalModules[url] = exports$1; // 與 loadModule 的快取方式一致
+      notify('ready', url);
+      return exports$1;
+    },
+    err => {
+      delete nativeLoads[url];
+      notify('error', url, err);
+      throw new Error('[vue-esm-runtime] 原生載入失敗 ' + url + '\n  ' + (err && err.message || err));
+    }
+  );
+  return nativeLoads[url];
+}
+
 // 語言處理器
 const langProcessor = {
   html: identity,
@@ -1969,7 +2057,7 @@ function loadComponent(url, name) {
       return Promise.resolve(modules[name]);
     }
 
-    return new Component(name)
+    return trackLoad(url, new Component(name)
       .load(url)
       .then(component => component.normalize(langProcessor))
       .then(component => component.compile(vueEsmRuntime$1, scriptExportsHandler))
@@ -1993,7 +2081,7 @@ function loadComponent(url, name) {
 
         modules[name] = exports$1;
         return modules[name];
-      });
+      }));
   };
 }
 
@@ -2162,9 +2250,14 @@ function loadModule(url, baseURI) {
     });
   }
 
+  // 要由瀏覽器原生載入的檔案：不抓文字、不改寫，瀏覽器自己載入（含它內部的 import）
+  if (isNativeURL(resolvedURL)) {
+    return loadNativeModule(resolvedURL);
+  }
+
   const moduleBaseURI = resolvedURL.substr(0, resolvedURL.lastIndexOf('/') + 1);
 
-  return httpRequest(resolvedURL).then(code => {
+  return trackLoad(resolvedURL, httpRequest(resolvedURL).then(code => {
     // 在改寫 import 之前預先加載依賴，確保能掃描到原始 import 語法中的非同步模組
     return preloadScriptDependencies(code).then(() => {
       const moduleObj = { exports: {} };
@@ -2260,7 +2353,7 @@ function loadModule(url, baseURI) {
     externalModules[resolvedURL] = moduleObj.exports;
     return moduleObj.exports;
   });
-  });
+  }));
 }
 
 /**
@@ -2434,6 +2527,12 @@ function requireModule(moduleName) {
     jsUrl = jsUrl + '.js';
   }
 
+  // 原生載入的檔案沒辦法同步載入（它們只能用 import() 載入）：沒有預先載入過就明確報錯，不要去同步 XHR 抓文字
+  if (typeof jsUrl === 'string' && isNativeURL(jsUrl)) {
+    console.error('[vue-esm-runtime] 原生模組必須先用 import() / loadModule() 載入完成才能同步取用:', jsUrl);
+    return undefined;
+  }
+
   // 同步載入 .js 檔案
   if (jsUrl.endsWith('.js') || jsUrl.includes('/composables/') || jsUrl.includes('/utils/')) {
     const xhr = new XMLHttpRequest();
@@ -2512,6 +2611,7 @@ function vueEsmRuntime$1(url, name) {
 }
 
 // 掛載 API
+vueEsmRuntime$1.options = options;
 vueEsmRuntime$1.modules = modules;
 vueEsmRuntime$1.externalModules = externalModules;
 vueEsmRuntime$1.langProcessor = langProcessor;
