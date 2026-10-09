@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>loadModule import / export 語法轉換測試</title>
+  <style>body{font:13px/1.6 monospace;margin:12px} .pass{color:#16a34a} .fail{color:#dc2626} pre{white-space:pre-wrap}</style>
+</head>
+<body>
+<!--
+  驗證 loadModule（.js 模組）對各種 import / export 寫法的改寫：
+  import * as、import Def, {…}、import {a as b}、import { default as X }、多行 import、import 'x'、
+  export { a, b as c }、export { x as default }、export class / async function / function* / let x;、
+  export * from、export { a as b } from、export * as ns from。
+  用法：npm run build 之後，用專案根目錄當 http-server 的根目錄，開 http://localhost:8080/test/esm-syntax.html
+  頁面底部會顯示 ALL PASSED（失敗時顯示 FAILED 與原因）。需要 HTTP，不能用 file://
+-->
+<pre id="result">running...</pre>
+
+<script src="../dist/vue-esm-runtime.js"></script>
+<script>
+(async function () {
+  const out = [];
+  let failed = 0;
+  const check = (name, ok, extra) => { out.push((ok ? 'PASS ' : 'FAIL ') + name + (ok ? '' : '\n     ' + (extra || ''))); if (!ok) failed++; };
+  const json = JSON.stringify;
+  const rt = vueEsmRuntime;
+  const load = name => rt.loadModule('./fixtures/esm/' + name + '.js');
+
+  // import
+  check('import * as ns', json((await load('ns')).out) === '[1,2,"function"]', json((await load('ns')).out));
+  const dn = await load('def-named');
+  check('import Def, { a as x, b } 與 import { default as D2 }', json(dn.out) === '["dep-default",1,2,"dep-default"]', json(dn.out));
+  const dns = await load('def-ns');
+  check('import Def, * as ns', json(dns.out) === '["dep-default",1]', json(dns.out));
+  const ml = await load('multiline');
+  check('多行 import { a as aa, b }', ml.sum === 3, String(ml.sum));
+  const su = await load('side-user');
+  check("import 'x'（只執行副作用，且只執行一次）", su.n === 1, String(su.n));
+
+  // export
+  const el = await load('export-list');
+  check('export { x, f as g }', el.x === 1 && el.g() === 'f', json([el.x, typeof el.g]));
+  check('export { y as default }：標記 __esModule 並能用 .default 取得', el.__esModule === true && el.default === 2, json([el.__esModule, el.default]));
+  check('export { late } 寫在宣告之前（getter，不受順序影響）', el.late === 'late', String(el.late));
+  const ed = await load('export-decl');
+  check('export class', typeof ed.K === 'function' && new ed.K().hi() === 'k', typeof ed.K);
+  check('export async function', (await ed.af()) === 'af');
+  check('export function*', json([...ed.gen()]) === '[1,2]');
+  check('export let x;（沒有初始值，live binding）', ed.counter === 7, String(ed.counter));
+
+  // 再匯出
+  const re = await load('reexport');
+  check('export * from（具名匯出，不含 default）', re.a === 1 && re.b === 2 && re.default === undefined, json([re.a, re.b, re.default]));
+  check('export { b as bb, default as depDefault } from', re.bb === 2 && re.depDefault() === 'dep-default', json([re.bb, typeof re.depDefault]));
+  check('export * as depNs from', re.depNs && re.depNs.a === 1 && re.depNs.b === 2, json(re.depNs));
+
+  out.push('');
+  out.push(failed ? 'FAILED: ' + failed : 'ALL PASSED');
+  document.getElementById('result').innerHTML = out.map(l => '<span class="' + (/^PASS/.test(l) ? 'pass' : /^FAIL|FAILED/.test(l) ? 'fail' : '') + '">' + l.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</span>').join('\n');
+  window.__failed = failed;
+  window.__lines = out;
+  window.__done = true;
+})().catch(function (e) {
+  document.getElementById('result').textContent = 'FAILED: ' + (e && e.stack || e);
+  window.__failed = 1; window.__lines = ['FAILED: ' + (e && e.stack || e)]; window.__done = true;
+});
+</script>
+</body>
+</html>

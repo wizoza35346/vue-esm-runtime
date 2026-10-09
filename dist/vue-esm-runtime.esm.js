@@ -2237,6 +2237,68 @@ function setScriptSetupCompiler(compiler) {
   vueEsmRuntime$1.scriptSetupCompiler = scriptSetupCompiler;
 }
 
+// ---- loadModule 用的 import / export 改寫輔助 ----
+
+function isRelativePath(p) {
+  return p.startsWith('./') || p.startsWith('../');
+}
+
+// 相對路徑（非 .vue）走非同步 loadModule（外層要 await），其餘走 require
+function moduleExpr(path) {
+  return isRelativePath(path) && !path.endsWith('.vue')
+    ? `await vueEsmRuntime.loadModule("${path}", __baseURI__)`
+    : `require("${path}")`;
+}
+
+// 'a, b as c, default as D' → [{ name, alias }]
+function parseSpecifiers(list) {
+  return list.split(',').map(s => s.trim()).filter(Boolean).map(s => {
+    const m = /^([\w$]+)\s+as\s+([\w$]+)$/.exec(s);
+    return m ? { name: m[1], alias: m[2] } : { name: s, alias: s };
+  });
+}
+
+let importSeq = 0;
+
+// 產生 import 的宣告語句：def 預設匯入名、ns 命名空間名、specs 具名匯入清單
+function buildImport(def, ns, specs, path) {
+  const id = `__imp${importSeq++}`;
+  let out = `const ${id} = ${moduleExpr(path)};`;
+  if (def) out += ` const ${def} = vueEsmRuntime.interopDefault(${id});`;
+  if (ns) out += ` const ${ns} = ${id};`;
+  const named = [];
+  specs.forEach(s => {
+    if (s.name === 'default') out += ` const ${s.alias} = vueEsmRuntime.interopDefault(${id});`;
+    else named.push(s.name === s.alias ? s.name : `${s.name}: ${s.alias}`);
+  });
+  if (named.length) out += ` const {${named.join(', ')}} = ${id};`;
+  return out;
+}
+
+// 用 getter 掛匯出（維持 live binding，也避免 class / let 的 TDZ）；匯出 default 時標記 __esModule
+function defineExports(target, getters) {
+  Object.keys(getters).forEach(key => {
+    Object.defineProperty(target, key, { enumerable: true, configurable: true, get: getters[key] });
+    if (key === 'default') Object.defineProperty(target, '__esModule', { value: true, configurable: true });
+  });
+  return target;
+}
+
+// export { a as b } from 'm' / export * from 'm' / export * as ns from 'm'；pairs: [[from, to]]，from 為 '*' 代表整個模組
+function reExport(target, mod, pairs) {
+  const getters = {};
+  if (!pairs) {
+    Object.keys(mod || {}).forEach(k => {
+      if (k !== 'default' && k !== '__esModule' && !(k in target)) getters[k] = () => mod[k];
+    });
+  } else {
+    pairs.forEach(([from, to]) => {
+      getters[to] = from === '*' ? () => mod : from === 'default' ? () => interopDefault(mod) : () => mod[from];
+    });
+  }
+  return defineExports(target, getters);
+}
+
 /**
  * 異步載入 JS 模組
  */
@@ -2261,7 +2323,8 @@ function loadModule(url, baseURI) {
     // 在改寫 import 之前預先加載依賴，確保能掃描到原始 import 語法中的非同步模組
     return preloadScriptDependencies(code).then(() => {
       const moduleObj = { exports: {} };
-      const hasAsyncImport = /import\s+[\w{].*from\s+['"]\..*['"]/.test(code);
+      // 有相對路徑的 import / export … from / import '…' 就要把整段包成 async（轉換後會有 await）
+      const hasAsyncImport = /\b(?:import|export)\s*(?:[^'";]*?\bfrom\s*)?['"]\./.test(code);
 
       // 針對 IIFE 形式套件（如 Vue、VueRouter 全域 bundle：var Vue = (function...)）
       // 自動改寫為 globalThis[VarName] = module.exports = ...，確保同時掛到 window 上並由 loadModule 導出
@@ -2292,13 +2355,21 @@ function loadModule(url, baseURI) {
       }
     );
 
-    // import { a, b } from './xxx.js'
-    code = code.replace(/import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g, (m, imports, path) => {
-      if (path.startsWith('./') || path.startsWith('../')) {
-        return `const {${imports}} = await vueEsmRuntime.loadModule("${path}", __baseURI__)`;
-      }
-      return `const {${imports}} = require("${path}")`;
-    });
+    // import * as ns from 'x'
+    code = code.replace(/import\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]\s*;?/g,
+      (m, ns, path) => buildImport(null, ns, [], path));
+
+    // import Def, * as ns from 'x'
+    code = code.replace(/import\s+([\w$]+)\s*,\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]\s*;?/g,
+      (m, def, ns, path) => buildImport(def, ns, [], path));
+
+    // import Def, { a, b as c } from 'x'
+    code = code.replace(/import\s+([\w$]+)\s*,\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]\s*;?/g,
+      (m, def, list, path) => buildImport(def, null, parseSpecifiers(list), path));
+
+    // import { a, b as c } from 'x'
+    code = code.replace(/import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]\s*;?/g,
+      (m, list, path) => buildImport(null, null, parseSpecifiers(list), path));
 
     // import xxx from './xxx.js' (套 interop：若模組標記 __esModule，取 .default；否則取整個 exports)
     code = code.replace(/import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/g, (m, name, path) => {
@@ -2308,9 +2379,28 @@ function loadModule(url, baseURI) {
       return `const ${name} = vueEsmRuntime.interopDefault(require("${path}"))`;
     });
 
+    // import 'x'（只執行副作用）
+    code = code.replace(/import\s*['"]([^'"]+)['"]\s*;?/g, (m, path) => `${moduleExpr(path)};`);
+
+    // 再匯出：export * from 'x' / export * as ns from 'x' / export { a as b } from 'x'
+    code = code.replace(/export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;?/g,
+      (m, path) => `vueEsmRuntime.reExport(module.exports, ${moduleExpr(path)});`);
+    code = code.replace(/export\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]\s*;?/g,
+      (m, ns, path) => `vueEsmRuntime.reExport(module.exports, ${moduleExpr(path)}, [["*", "${ns}"]]);`);
+    code = code.replace(/export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]\s*;?/g, (m, list, path) => {
+      const pairs = parseSpecifiers(list).map(s => `["${s.name}", "${s.alias}"]`).join(', ');
+      return `vueEsmRuntime.reExport(module.exports, ${moduleExpr(path)}, [${pairs}]);`;
+    });
+
+    // export { a, b as c }（用 getter 掛，不受宣告順序影響）
+    code = code.replace(/export\s*\{([^}]*)\}\s*;?/g, (m, list) => {
+      const getters = parseSpecifiers(list).map(s => `"${s.alias}": () => ${s.name}`).join(', ');
+      return `vueEsmRuntime.defineExports(module.exports, {${getters}});`;
+    });
+
     // 偵測是否同時有 default 與具名匯出，決定 default 的轉換策略
     const hasDefault = /export\s+default\s+/.test(code);
-    const hasNamed = /export\s+(const|let|var|function)\s+|export\s+\{/.test(code);
+    const hasNamed = /export\s+(?:const|let|var|function|async|class)\b|vueEsmRuntime\.(?:defineExports|reExport)\(/.test(code);
     const isMixedExports = hasDefault && hasNamed;
 
     if (isMixedExports) {
@@ -2328,9 +2418,23 @@ function loadModule(url, baseURI) {
 
     // export function — 用 hoisted function declaration 確保名字在 module scope 可見
     // 不然 `module.exports.default = { foo }` shorthand 會 ReferenceError
-    code = code.replace(/export\s+function\s+(\w+)/g, (m, name) => {
-      return `module.exports.${name} = ${name}; function ${name}`;
+    code = code.replace(/export\s+(async\s+)?function(\s*\*)?\s*(\w+)/g, (m, isAsync, star, name) => {
+      return `module.exports.${name} = ${name}; ${isAsync ? 'async ' : ''}function${star ? '*' : ''} ${name}`;
     });
+
+    // export class / export let|var x;（沒有初始值）：宣告不會提升，改成開頭先掛 getter
+    const deferred = [];
+    code = code.replace(/export\s+class\s+([\w$]+)/g, (m, name) => {
+      deferred.push(name);
+      return `class ${name}`;
+    });
+    code = code.replace(/export\s+(let|var)\s+([\w$]+)\s*(?=[;\n]|$)/g, (m, kw, name) => {
+      deferred.push(name);
+      return `${kw} ${name}`;
+    });
+    if (deferred.length) {
+      code = `vueEsmRuntime.defineExports(module.exports, {${deferred.map(n => `"${n}": () => ${n}`).join(', ')}});\n` + code;
+    }
 
     if (hasAsyncImport) {
       code = 'return (async function() {\n' + code + '\n})()';
@@ -2627,6 +2731,8 @@ vueEsmRuntime$1.require = requireModule;
 vueEsmRuntime$1.resolveURL = resolveURL;
 vueEsmRuntime$1.httpRequest = httpRequest;
 vueEsmRuntime$1.interopDefault = interopDefault;
+vueEsmRuntime$1.defineExports = defineExports;
+vueEsmRuntime$1.reExport = reExport;
 vueEsmRuntime$1.resolveAsyncModule = resolveAsyncModule;
 vueEsmRuntime$1.preloadScriptDependencies = preloadScriptDependencies;
 
